@@ -359,7 +359,7 @@ an absolute sense.
 The rhs of least squares problem comes from the residuals in the current
 model. 
 (That's a detail - you can also go directly for a correlated $\chi^2$ 
-function and use $I_{obs}-I_{calc}$ where $I_obs$ comes from the
+function and use $I_{obs}-I_{calc}$ where $I_{obs}$ comes from the
 pattern decomposition).
 
 \section{Partitioning models}
@@ -1718,6 +1718,68 @@ import Numeric
 @< readid11edf @>
 @}
 
+We could also benefit from placing these into an image
+data object which is just like a powder data object
+Exactly how to do this is not clear, but the memory intensive
+but very easy way is to have three 2D arrays which contain
+the x pixel position, y pixel position and intensity
+value. Initially these might be just the array indices,
+but as soon as a spatial distortion is computed they
+become the true pixel positions. For cunning approaches
+you might like to make them the radial and phi values
+for a radial transforms.
+
+@o imagedata.py
+@{
+"""
+Image data object
+"""
+import Numeric
+class imagedata:
+   def __init__(self, x0, x1, y, d, w=None):
+      """ 
+      x0 = x positions in 2D array
+      x1 = "y" positions in 2D array
+      y  = 2D array - will be ravelled for the optimiser
+      d  = dictionary of metadata
+      e  = error bars if known 
+      """
+      self.x0=Numeric.ravel(x0)  # Stores a reference
+      self.x1=Numeric.ravel(x1)
+      self.y =Numeric.ravel(y)
+      self.npoints=self.y.shape[0] 
+      self.d = d
+      self.w = w
+      self.shape = y.shape
+      assert x0.shape == x1.shape == y.shape , "Shapes do not match"
+   def weightmatvec(self,vector):
+      if self.w==None:
+         # Unit weights
+         return vector
+      else:
+         return vector*Numeric.ravel(self.w)
+
+def getxy(yshape):
+   """
+   Make arrays of x,y indices
+   """
+   return Numeric.outerproduct(Numeric.arange(yshape[0]),Numeric.ones(yshape[1])) ,\
+          Numeric.outerproduct(Numeric.ones(yshape[0]),Numeric.arange(yshape[1]))
+
+def readimage(filename,imagetype):
+   import imagereaders
+   if imagetype in ["edf","EDF"]:
+      h,y=readid11edf(filename)
+      x0,x1=getxy(y.shape)
+   if imagetype in ["Bruker","bruker","BRUKER"]:
+      h,y=readbruker(filename)
+      x0,x1=getxy(y.shape)
+   try:
+      return imagedata(x0,x1,y,h)
+   except:
+      print "Imagetype",imagetype,"not recognised"
+      return None
+@}
 
 
 \section{The correlated integrated intensity stuff from prodd}
@@ -2644,9 +2706,15 @@ class model:
    def get_errorbar(self,variable):
       return self.ve[self.vd[variable]] 
 
-
    def get_variables(self):
-       return self.variables
+      return self.variables
+
+   def report(self):
+      print "Variable , value, e"
+      for v in self.variables:
+         vi=self.vd[v]
+         print v,self.vv[vi],self.ve[vi]
+      
 @}
 
 Then to refine a single constant value we only need to fill out the list
@@ -2781,8 +2849,21 @@ class densemodelfit:
          self.marq=1.0
       else:
          self.marq=marq
+      self.fixlist=Numeric.zeros(self.nv,Numeric.Int)
 
-   def refine(self, ncycles=1,quiet=0):
+   def fix(self,variable):
+      try:
+         self.fixlist[self.variables.index(variable)]=1
+      except:
+         print variable,"not recognised"
+
+   def vary(self,variable):
+      try:
+         self.fixlist[self.variables.index(variable)]=0
+      except:
+         print variable,"not recognised"
+
+   def refine(self, ncycles=1,quiet=0,debug=0):
       start=time.time()
       end=self.icyc+ncycles
       while self.icyc < end: 
@@ -2795,7 +2876,8 @@ class densemodelfit:
 # 1D        self.rhs=matrixmultiply(obsminuscalc/self.data.e,ge)
          g=Numeric.zeros((self.data.npoints,self.nv),Numeric.Float32)   # gradient array
          for i in range(self.nv):                        # avoid this somehow?
-            g[:,i] = self.model.gradient(self.variables[i])
+            if self.fixlist[i]==0:
+               g[:,i] = self.model.gradient(self.variables[i])
          wg=Numeric.zeros((self.data.npoints,self.nv),Numeric.Float32)     # weighted gradient array
          for i in range(self.nv):
             wg[:,i] = self.data.weightmatvec(g[:,i])
@@ -2808,7 +2890,7 @@ class densemodelfit:
             for i in range(self.nv):
                self.lsqmat[i,i] = self.marq*self.lsqmat[i,i]
          # invert to find shift (no need really...)
-         self.inverse=self.generalized_inverse(self.lsqmat)
+         self.inverse=self.generalized_inverse(self.lsqmat,debug)
          shifts = Numeric.matrixmultiply(self.inverse,self.rhs).astype(Numeric.Float32)
 # 1D          self.chi2=sum(obsminuscalc*obsminuscalc/self.data.e/self.data.e)
          self.chi2=sum(obsminuscalc* self.data.weightmatvec(obsminuscalc) )
@@ -2820,7 +2902,13 @@ class densemodelfit:
          if quiet==0:
             print "Cycle ",self.icyc," chi^2 = ",self.chi2, "Reduced chi^2=",self.reducedchi2
          for item in self.variables:
-            self.model.apply_shift(item,shifts[self.vd[item]])
+            i=self.vd[item]
+            self.model.apply_shift(item,shifts[i])
+            if self.emat[i,i]>0.:
+               e=math.sqrt(self.emat[i,i])
+            else:
+               e=0.0
+            self.model.set_errorbar(item,e)
          self.icyc+=1
       #
       # End cycles loop
@@ -2828,16 +2916,15 @@ class densemodelfit:
          print "Variable  Value           Esd             Shift           Shift/esd"
          for item in self.variables:
             i=self.vd[item]
-            e=math.sqrt(self.emat[i,i])
-            self.model.set_errorbar(item,e)
             print "%8s  %-10.7e"%( item,self.model.get_value(item)),
+            e=self.model.ve[self.model.vd[item]]
             if e>0.:
                print " %-10.7e  %-10.7e  %-10.7e"%(e, shifts[i] , shifts[i]/e )
             else:
                print " %-10.7e  %-10.7e  NaN"%(e, shifts[i] )
          print "Time for that cycle was:",time.time()-start
          
-   def generalized_inverse(self,matrix):
+   def generalized_inverse(self,matrix,debug=0):
        # marker to try out or not scaling the matrix
        # I hope the LinearAlgebra package does not need this??
        # The idea is to make the diagonal of the matrix have equal elements
@@ -2856,11 +2943,18 @@ class densemodelfit:
              mycopy[i,:]=(mycopy[i,:]/s[i])
              mycopy[:,i]=(mycopy[:,i]/s[i])
           else:
-             mycopy[:,i]=0. ; mycopy[i,:]=0.; mycopy[i,i]=1. ; s[i]=1.
+             mycopy[:,i]=0. ; mycopy[i,:]=0.; mycopy[i,i]=1. ; s[i]=-1.
+             if debug!=0 : print i,s[i]
+       if debug!=0: print s,"\n",mycopy
        inv = generalized_inverse(mycopy)   
+       if debug!=0: print inv
        for i in range(matrix.shape[0]):
-          inv[i,:]=inv[i,:]/s[i]
-          inv[:,i]=inv[:,i]/s[i]
+          if s[i]>0:
+             inv[i,:]=inv[i,:]/s[i]
+             inv[:,i]=inv[:,i]/s[i]
+          else:
+             inv[i,:]=0.
+             inv[:,i]=0.
        return inv
 
 @}
@@ -3002,6 +3096,111 @@ if __name__=="__main__":
 This would be used for optimisation against a set of correlated integrated
 intensities, but the gradients can become sparse for example in a multiphase
 refinement, where one phase is protein and the other is not.
+
+
+\section{Choosing particular sets of integrated intensities}
+
+This is currently in the optimisation chapter as this seems to be mainly
+an optimisation problem. 
+In practice the actual methods used to choose particular sets of integrated 
+intensities might be designed elsewhere, but we would still like to have a 
+generalised way of finding convenient sets of "observed" values when the
+actual observed data are correlated. 
+
+The statement of the problem is therefore: Minimise the $\chi^2$ goodness
+of fit indicator with a perturbative term added to select a particular
+set of "observed" values.
+
+Normally we have:
+\[ \chi^2 = \sum_{ij} (I_{o,i} - I_{c,i}) W_{ij} (I_{o,j} - I_{c,j}) \]
+Thus we want to find the set of $I_{c}$ values which are closer to
+some other target without overly perturbing this original fit function.
+We can specify a tolerance by which this $\chi^2$ function can be increased
+to account for noise in the data.
+For a 1 dimensional weight matrix this corresponds to shifting the "observed" 
+data by some small amount towards the model. Small depends on the tolerance
+given.
+We will be supplied with a function which takes a list of intensities 
+and returns first derivatives of itself with respect to the intensities.
+The modified $\chi^2$ function is then:
+\[ \chi^2 =  \lambda \sum_{ij} (I_{o,i} - I_{c,i}) W_{ij} (I_{o,j} - I_{c,j}) + f(I_{c})  \]
+At a minimum:
+\[ \frac{d\chi^2}{d I_{c,i}} = 0 = -2 \lambda \sum_{j} W_{ij}(I_{o,j} - I_{c,j}) + 
+                                     \frac{df(I_{c})}{d I_{c,i}} \]
+This leads to a set of matrix equations to solve:
+\[  \mb{W I}_o - \frac{1}{\lambda} \frac{df(I_{c})}{d I_{c,i}} =  \mb{W I}_c \]
+We need to determine a value for the lambda parameter.
+
+This can be done by selecting the actual value for the $\chi^2$ function
+which is to be used as a constraint.   
+Various pages on the web give methods for determining $\lambda$ for simple
+analytical functions.
+We want to find a general method when the constraint function is well behaved
+(does not depend on $I_c$) and also when it does depend on $I_c$, which might
+proceed iteratively.
+
+For starters we will go through some different target functions.
+
+\subsection{Minimise the sum of intensity squared}
+
+This is the approach which was originally taken in MPRODD. 
+The function to be optimised is
+\[ f(I(hkl)) = \sum_{hkl} I(hkl)^2 \]
+\[ \frac{df(I(hkl))}{dI(hkl)} = 2 I(hkl) \]
+Clearly this depends on the units chosen for the intensities.
+
+\subsection{Minimise the ``entropy'' of the intensities}
+
+A poke at the maximum entropy approach. 
+Normally entropic techniques are applied in real space with the 
+arguement that density in a map must be strictly positive 
+and normalisable.'
+Via a Fourier transform, the measured structure factors also
+have to be positive and normalisable, hence the same story would
+appear to apply.
+Instead of monkeys throwing density into pixels think about the 
+atoms in your sample throwing photons or neutrons into diffraction
+peaks.
+\[ f(I(hkl)) = \sum_{hkl} P(I(hkl)) log(P(I(hkl))) \]
+Where $P(x)$ is the probability of $x$. It should be set 
+such that the integral is one.
+\[ \frac{df(I(hkl))}{dI(hkl)} = \frac{dP(I(hkl))}{dI(hkl)} (log(P(I(hkl))) + 1) \]
+If we do set the scaling to get $\sum I(hkl) = 1$ then we get:
+\[ P(I(hkl)) = \frac{I(hkl)}{\sum_{hkl} I(hkl)} \]
+
+\subsection{Minimise an r-factor}
+
+For use in computing conventional r-factors with correlated data. 
+In the absence of having actual values to use, we will pick 
+the ones which give us the best r-factor, introducing a massive
+model bias in anything you then go on to do with them.
+\[ f(I(hkl)) = \sum \frac{ (I_o - I_c)^2 }{ \sigma^2} \]
+Here the $\sigma$ is a weighting to apply to a particular
+intensity - probably coming from the model.
+\[ \frac{f(I(hkl))}{I(hkl)} =  \frac{ -2(I_o - I_c)} { \sigma^2} \]
+Alternatively you can flip a sign and then maximise this 
+r-factor to get away from a particular set of intensities.
+
+\subsection{Maxmise a correlation coefficient}
+
+If a partial model is available, or you are attempting to position
+and orient a molecule in a unit cell, the correlation coefficient
+can be a useful tool.
+
+From Lattman and Love~\cite{lattmanandlove1970} a function is 
+defined which is proposed to be maximised when to orientation
+of a molecule matches the orientation in the unit cell. 
+They indicate that the usual approach (uses an inteference function)
+in computing a rotation function is not required since the molecular
+transform is itself bounded.
+The function is:
+\[ R(C) = \sum_{p} F^2_m(Cp)F^2_2(p) \]
+I am assuming that $F^2_2$ are the data, although they also fuss
+about trying to remove the Patterson origin peak. $C$ is a rotation
+matrix used to orient the molecule before carrying out the sum.
+
+In this case we will assume the orientation is fixed and just try to 
+optimise the set of intensities to maximise this function.
 
 
 
@@ -3493,166 +3692,7 @@ c   dPRdE is derivative of profile wrt Eta
 
 \section{Peak widths as a function of Q}
 
-\section{Peak fitting}
 
-Standalone peak fitting is a handy thing to be able to do prior to indexing
-a pattern, or for strain scanning type experiments.
-Assuming we have a dataset containing x-values in memory and some y-values
-and error bars we can attempt a peak fit. 
-Initial values for the parameters are a great help.
-
-\subsection{Fitting a single peak}
-
-Estimation and fitting of a single peak via a single python
-function. It will take a x,y,e arrays as arguements and optional
-parameters for the initial estimates. Need to estimate
-the initial values if they are not present.
-
-@o profvalplusback.py
-@{
-@< pycopyright @>
-import Numeric as n
-import model
-import profval
-class profvalplusback(model.model):
-   def __init__(self,**kwds):
-      """
-      arglist = back,area,center,width,eta,s_l,d_l
-      Fits a single peak to some data
-      Optional arguments will be estimated when computing if not present
-      If both s_l and d_l are zero the peak is assumed to have
-      no low angle asymmetry contribution and these are fixed at zero.
-      """
-      self.variables=['back','area','center','width','eta','s_l','d_l']
-      self.use_asym=0
-      if "s_l" in kwds.keys(): self.use_asym=1
-      if "d_l" in kwds.keys(): self.use_asym=1
-      model.model.__init__(self,**kwds)
-      # Gradients are ycalc[0]/area for area
-      #               1             for back
-      self.gl={} # gradient location lookups
-      self.gl['center']=1  #               ycalc[1] for center
-      self.gl['width'] =2  #               ycalc[2] for width
-      self.gl['eta']   =3  #               ycalc[3] for eta
-      self.gl['s_l']   =4  #               ycalc[4] for s_l
-      self.gl['d_l']   =5  #               ycalc[5] for d_l
-
-   def get_variables(self):
-      """
-      Override the default behaviour by turning off s_l/d_l if we want to
-      """
-      if self.use_asym==1: return self.variables
-      else:                return self.variables[0:5]
-
-   def estimate(self,data):
-      xymax=n.argmax(data.y)
-      xymin=n.argmin(data.y)
-      if not self.set['back']:
-         self.vv[self.vd['back']]=data.y[xymin]
-         self.set['back']=True
-      if not self.set['center']:
-         self.vv[self.vd['center']]=data.x[xymax]
-         self.set['center']=True
-      if not self.set['width']:
-         # have to walk array
-         halfway=0.5*(data.y[xymin]+data.y[xymax])
-         i=xymax
-         xl=data.x[0]
-         while i > 0: 
-            i=i-1
-            if data.y[i]<halfway:
-               xl=data.x[i]
-               break
-         i=xymax
-         xh=data.x[-1]
-         while i < data.x.shape[0]: 
-            i=i+1
-            if data.y[i]<halfway:
-               xh=data.x[i]
-               break
-         self.vv[self.vd['width']] = abs(xl-xh)
-         self.set['width']=True
-      if not self.set['eta']:
-         self.vv[self.vd['eta']]=0.5
-         self.set['eta']=True
-      if not self.set['area']:
-         self.vv[self.vd['area']]=self.vv[self.vd['width']]*(data.y[xymax]-data.y[xymin])
-         self.set['area']=True
-      if not self.set['s_l'] and self.use_asym==1:
-         self.vv[self.vd['s_l']]=0.0005
-         self.set['s_l']=True
-      if not self.set['d_l'] and self.use_asym==1:
-         self.vv[self.vd['d_l']]=0.0005
-         self.set['d_l']=True
-      if self.use_asym==0:
-         self.vv[self.vd['s_l']]=self.vv[self.vd['d_l']]=0.
-         self.set['s_l']=True
-         self.set['d_l']=True
-
-
-   def compute(self,data):
-      if False in self.set.values(): self.estimate(data)
-      eta    = self.vv[self.vd['eta']]
-      center = self.vv[self.vd['center']]
-      gamma  = self.vv[self.vd['width']]
-      s_l    = self.vv[self.vd['s_l']]
-      d_l    = self.vv[self.vd['d_l']]
-      area   = self.vv[self.vd['area']]
-      #print "Computing ",eta,gamma,s_l,d_l,center,area,self.use_asym
-      self.pva=profval.profval_array(eta, gamma, s_l, d_l,data.x.astype(n.Float32),
-               center, area, self.use_asym)
-      self.ycalc=self.pva[0]+self.vv[self.vd['back']]
-
-   def gradient(self,variable):
-      """
-      self.pva is a tuple holding:
-       ( peak_calc, dprdt , dprdg, dprde, dprds, dprdd )
-      Returns the appropriate bit of it via the dictionary self.gl (gradient location)
-      """
-      if variable=='area':
-         return (self.ycalc/self.vv[self.vd['area']]).astype(n.Float32)
-      if variable=='back':
-         return n.ones(self.ycalc.shape,n.Float32)
-      return self.pva[ self.gl[variable]  ] 
-@}
-
-
-@o peakfit.py
-@{
-@< pycopyright @>
-
-import profvalplusback
-import densemodelfit
-
-
-if __name__=="__main__":
-   import epffile, powbase, mcadata, sys
-   if len(sys.argv)<3:
-      print "Usage: %s filename format [low] [high]"%(sys.argv[0])
-      print "Formats are [epf|mca|powbase] where epf is x,y,errorbar ascii" 
-      sys.exit()
-   else:
-      try:
-         if sys.argv[2]=="powbase":
-            dat=powbase.powbase(sys.argv[1])
-         if sys.argv[2]=="epf":
-            dat=epffile.epffile(sys.argv[1])
-         if sys.argv[2]=="mca":
-            dat=mcadata.mcadata(sys.argv[1])
-      except:
-         print "Could not read your file %s" % (sys.argv[1])
-         raise
-   if len(sys.argv)>3:
-      lh=map(float,sys.argv[3:5])
-      lh.sort()
-      dat.setrange(lh)
-   model=profvalplusback.profvalplusback()
-   optimiser=densemodelfit.densemodelfit(model=model,data=dat)
-   optimiser.refine(ncycles=1)
-   while raw_input("More cycles?") != "":
-      optimiser.refine(ncycles=1)
-@}
- 
 
 \chapter{Peak center functions}
 
@@ -8011,6 +8051,276 @@ if __name__=="__main__":
 @}
 
 
+\section{Peak fitting}
+
+Standalone peak fitting is a handy thing to be able to do prior to indexing
+a pattern, or for strain scanning type experiments.
+Assuming we have a dataset containing x-values in memory and some y-values
+and error bars we can attempt a peak fit. 
+Initial values for the parameters are a great help.
+
+\subsection{Fitting a single peak}
+
+Estimation and fitting of a single peak via a single python
+function. It will take a x,y,e arrays as arguements and optional
+parameters for the initial estimates. Need to estimate
+the initial values if they are not present.
+
+@o profvalplusback.py
+@{
+@< pycopyright @>
+import Numeric as n
+import model
+import profval
+class profvalplusback(model.model):
+   def __init__(self,**kwds):
+      """
+      arglist = back,area,center,width,eta,s_l,d_l
+      Fits a single peak to some data
+      Optional arguments will be estimated when computing if not present
+      If both s_l and d_l are zero the peak is assumed to have
+      no low angle asymmetry contribution and these are fixed at zero.
+      """
+      self.variables=['back','area','center','width','eta','s_l','d_l']
+      self.use_asym=0
+      if "s_l" in kwds.keys(): self.use_asym=1
+      if "d_l" in kwds.keys(): self.use_asym=1
+      model.model.__init__(self,**kwds)
+      # Gradients are ycalc[0]/area for area
+      #               1             for back
+      self.gl={} # gradient location lookups
+      self.gl['center']=1  #               ycalc[1] for center
+      self.gl['width'] =2  #               ycalc[2] for width
+      self.gl['eta']   =3  #               ycalc[3] for eta
+      self.gl['s_l']   =4  #               ycalc[4] for s_l
+      self.gl['d_l']   =5  #               ycalc[5] for d_l
+
+   def get_variables(self):
+      """
+      Override the default behaviour by turning off s_l/d_l if we want to
+      """
+      if self.use_asym==1: return self.variables
+      else:                return self.variables[0:5]
+
+   def estimate(self,data):
+      xymax=n.argmax(data.y)
+      xymin=n.argmin(data.y)
+      if not self.set['back']:
+         self.vv[self.vd['back']]=data.y[xymin]
+         self.set['back']=True
+      if not self.set['center']:
+         self.vv[self.vd['center']]=data.x[xymax]
+         self.set['center']=True
+      if not self.set['width']:
+         # have to walk array
+         halfway=0.5*(data.y[xymin]+data.y[xymax])
+         i=xymax
+         xl=data.x[0]
+         while i > 0: 
+            i=i-1
+            if data.y[i]<halfway:
+               xl=data.x[i]
+               break
+         i=xymax
+         xh=data.x[-1]
+         while i < data.x.shape[0]: 
+            i=i+1
+            if data.y[i]<halfway:
+               xh=data.x[i]
+               break
+         self.vv[self.vd['width']] = abs(xl-xh)
+         self.set['width']=True
+      if not self.set['eta']:
+         self.vv[self.vd['eta']]=0.5
+         self.set['eta']=True
+      if not self.set['area']:
+         self.vv[self.vd['area']]=self.vv[self.vd['width']]*(data.y[xymax]-data.y[xymin])
+         self.set['area']=True
+      if not self.set['s_l'] and self.use_asym==1:
+         self.vv[self.vd['s_l']]=0.0005
+         self.set['s_l']=True
+      if not self.set['d_l'] and self.use_asym==1:
+         self.vv[self.vd['d_l']]=0.0005
+         self.set['d_l']=True
+      if self.use_asym==0:
+         self.vv[self.vd['s_l']]=self.vv[self.vd['d_l']]=0.
+         self.set['s_l']=True
+         self.set['d_l']=True
+
+
+   def compute(self,data):
+      if False in self.set.values(): self.estimate(data)
+      eta    = self.vv[self.vd['eta']]
+      center = self.vv[self.vd['center']]
+      gamma  = self.vv[self.vd['width']]
+      s_l    = self.vv[self.vd['s_l']]
+      d_l    = self.vv[self.vd['d_l']]
+      area   = self.vv[self.vd['area']]
+      #print "Computing ",eta,gamma,s_l,d_l,center,area,self.use_asym
+      self.pva=profval.profval_array(eta, gamma, s_l, d_l,data.x.astype(n.Float32),
+               center, area, self.use_asym)
+      self.ycalc=self.pva[0]+self.vv[self.vd['back']]
+
+   def gradient(self,variable):
+      """
+      self.pva is a tuple holding:
+       ( peak_calc, dprdt , dprdg, dprde, dprds, dprdd )
+      Returns the appropriate bit of it via the dictionary self.gl (gradient location)
+      """
+      if variable=='area':
+         return (self.ycalc/self.vv[self.vd['area']]).astype(n.Float32)
+      if variable=='back':
+         return n.ones(self.ycalc.shape,n.Float32)
+      return self.pva[ self.gl[variable]  ] 
+@}
+
+
+@o peakfit.py
+@{
+@< pycopyright @>
+
+import profvalplusback
+import densemodelfit
+
+
+if __name__=="__main__":
+   import epffile, powbase, mcadata, sys
+   if len(sys.argv)<3:
+      print "Usage: %s filename format [low] [high]"%(sys.argv[0])
+      print "Formats are [epf|mca|powbase] where epf is x,y,errorbar ascii" 
+      sys.exit()
+   else:
+      try:
+         if sys.argv[2]=="powbase":
+            dat=powbase.powbase(sys.argv[1])
+         if sys.argv[2]=="epf":
+            dat=epffile.epffile(sys.argv[1])
+         if sys.argv[2]=="mca":
+            dat=mcadata.mcadata(sys.argv[1])
+      except:
+         print "Could not read your file %s" % (sys.argv[1])
+         raise
+   if len(sys.argv)>3:
+      lh=map(float,sys.argv[3:5])
+      lh.sort()
+      dat.setrange(lh)
+   model=profvalplusback.profvalplusback()
+   optimiser=densemodelfit.densemodelfit(model=model,data=dat)
+   optimiser.refine(ncycles=1)
+   while raw_input("More cycles?") != "":
+      optimiser.refine(ncycles=1)
+@}
+ 
+\section{Two dimensional peak fitting}
+
+In order to refine detector parameters we would like to 
+be able to fit a standard calibration image in terms 
+of a set of peak intensities positions and widths. 
+This means fitting the 2D data. 
+We'll assume we have a 2D data object which we are 
+trying to fit a peak to. 
+
+\subsection{Point like peaks - Gaussian}
+
+Parameters to refine would be the centre in x and y
+as well as a width, which might be in x, y, or xy (generally 
+an ellipse I guess). 
+The peak function is:
+
+\[ \phi(x,y) = C \exp( x^2 / \sigma_x^2) \exp(y^2 / \sigma_y^2)\exp( xy/ \sigma_{xy}) \]
+
+If you take $\sigma_{xy}=0$ the last term comes out to $\exp(0)=1$ and you can forget about
+it. 
+The variables are then three width parameters and a centre in x and y.
+
+@o twodgaussian.py
+@{
+""" Model object for a 2 dimensional Gaussian peak """
+@< pycopyright @>
+
+import Numeric
+import model
+
+class twodgaussian(model.model):
+   """ Models a 2 dimensional Gaussian """
+   def __init__(self,**kwds):
+      self.variables=["back","height","x_cen","y_cen","x_width","y_width"]
+      model.model.__init__(self,**kwds)
+
+   def estimate(self,data):
+      # Background - lowest value in image
+      self.vv[self.vd['back']]=Numeric.minimum.reduce(data.y)
+      mx=Numeric.argmax(data.y)
+      self.vv[self.vd['x_cen']]=data.x0[mx]
+      self.vv[self.vd['y_cen']]=data.x1[mx]
+      self.vv[self.vd['x_width']]=3.0
+      self.vv[self.vd['y_width']]=3.0
+      self.vv[self.vd['height']] =data.y[mx]
+
+   def compute(self,data):
+      # Compute dx and dy / width
+      # G(x) = exp(-x^2/2w^2)/sqrt(2pi) w
+      # G(x,y) = [exp(-x^2/2w^2)/sqrt(2pi) w] * [exp(-x^2/2w^2)/sqrt(2pi) w]
+      self.s0=self.vv[self.vd['x_width']]
+      self.s1=self.vv[self.vd['y_width']]
+      self.d0 = (data.x0 - self.vv[self.vd['x_cen']])/self.s0
+      self.d1 = (data.x1 - self.vv[self.vd['y_cen']])/self.s1
+      ar = (self.d0*self.d0 + self.d1*self.d1)/2.
+      self.e  = Numeric.exp(-ar).astype(Numeric.Float32)
+      self.ycalc = self.vv[self.vd['height']] * self.e + self.vv[self.vd['back']]
+      # Derivatives with respect to centre, width, height, back
+
+   def gradient(self,variable):
+      if variable=='height':
+         return self.e
+      if variable=='back':
+         return Numeric.ones(self.ycalc.shape,Numeric.Float32)
+      if variable=='x_cen':
+         return (self.vv[self.vd['height']]*self.d0*self.e/self.s0).astype(Numeric.Float32)
+      if variable=='y_cen':
+         return (self.vv[self.vd['height']]*self.d1*self.e/self.s1).astype(Numeric.Float32)
+      if variable=='x_width':
+         return (self.vv[self.vd['height']]*self.d0*self.d0*self.e/self.s0).astype(Numeric.Float32)
+      if variable=='y_width':
+         return (self.vv[self.vd['height']]*self.d1*self.d1*self.e/self.s1).astype(Numeric.Float32)
+
+if __name__=="__main__":
+   xr=20 ; yr=30 ; xc=10. ; yc=15. ; xw=4. ; yw=4. ; bh=100. ; scale=100.
+   import RandomArray
+   from math import sqrt
+   dat=RandomArray.standard_normal((xr,yr))*sqrt(bh)+bh
+   import imagedata
+   x,y = imagedata.getxy((xr,yr))
+   dat = dat + scale*Numeric.exp( - (x-xc)*(x-xc)/2/xw/xw - (y-yc)*(y-yc)/2/yw/yw)
+   datobj=imagedata.imagedata(x,y,dat,None)
+   model=twodgaussian()
+   model.estimate(datobj)
+   model.compute(datobj)
+   import densemodelfit
+   optimiser = densemodelfit.densemodelfit(model=model,data=datobj,marq=1.)
+   optimiser.fix("x_cen")
+   from matplotlib.matlab import *
+   while 1:
+      plot(model.ycalc,'r')
+      plot(datobj.y,'b')
+      plot(datobj.y-model.ycalc,'g')
+      show()
+      n=raw_input("More cycles?")
+      if n in ["", "0"] : break
+      try:
+            n=int(n)
+      except:
+            n=1  
+      optimiser.refine(ncycles=n)
+@}
+
+
+Those derivatives should be from the following:
+\[ f(x,y)  = e^{-x^2/2\sigma^2} e^{-y^2/2\sigma^2} \]
+\[ \frac{df}{dx} = \frac{-x/\sigma^2}f(x,y) \]
+\[ \frac{df}{d\sigma} = \frac{x^2/\sigma^3}f(x,y) \]
+
+
 
 \chapter{Crystal structure refinement}
 
@@ -8781,6 +9091,54 @@ Any implementation of magnetism \emph{must} use the symmetry of the
 crystal structure. 
 None of this expanding to P1 crap - either you do the symmetry properly
 or you don't make it part of this program please!
+
+\chapter{Maps}
+
+In solving and refining crystal structures a key point is to
+be able to derive maps of the scattering density (be it neutron
+or x-ray). 
+There are a set of conventional maps which can be generated
+by a fourier transform, and other ways of generating a map
+which are more or less easy to interpret. 
+In all cases we will need to somehow account for the overlap
+problem.
+
+\section{Map? PAM!}
+
+During a nice talk at EPDIC about the BRASS Rietveld system
+the idea of a "grid search" map was introduced. 
+This gives a handy way to incorporate overlap information
+and at the same time actually plot something more useful.
+The idea is instead of computing a fourier map, instead we
+could plot out the way the $\chi^2$ goodness of fit indicator
+varies if an extra atom is added at position x,y,z. 
+
+Thus we need to compute the $\chi^2$ as a function of x,y,z
+for a particular probe atom and set of computed structure
+factors.
+
+We can then convert the map to be something like $\exp(-\chi^2)$
+to represent a probability and also look for contouring the 
+map via sigma levels.
+
+Computing this as a series of 2D sections might make it easier to
+optimise things. Probably worthwhile to make it a fortran or
+c extension quite quickly.
+
+\section{Map display}
+
+Assuming some sort of map has been computed we have a 3D function
+which has values $f(x,y,z)$ to be displayed. Generally this seems
+to be a difficult thing to do, with an algorithm which is called
+"Marching Cubes" having been patented to do just this.
+
+Is there some other way to do this? The 2D peak search using 
+a disjoint set allows connected blob regions to be identified. 
+We would then just need to draw a surface for each blob.
+I think the "Marching Cubes" is about drawing the surface. 
+
+Perhaps worth getting vtk up and running. It has python bindings
+but the defaults windows binary was for python2.1. 
 
 \chapter{Symmetry constraints}
 
@@ -11596,6 +11954,10 @@ of numbers.
 George, A. and Liu, J. W. H;
 ``Computer Solution of Sparse Positive Definite Systems'',
 Prentice-Hall Inc, 1981
+
+\bibitem{lattmanandlove1970}
+Eaton E. Lattman and Warner E. Love. ``A Rotational Search Procedure
+for Detecting A Known Molecule In a Crystal'' Acta. Cryst. (1970) B26, 1854.
 
 \end{thebibliography}
 \end{document}
