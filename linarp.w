@@ -584,7 +584,7 @@ A short script which just shows something about python and references
 Demonstrates something about classes, objects and how we plan to link
 various things together without copying
 """
-from Numeric import *
+import Numeric as n
 class myclass:
    """ Class to hold some data of some form """
    def __init__(self, data):
@@ -600,8 +600,8 @@ class myfunction:
       """ Calling the function object just returns the data for now """
       return self.object_to_get_data_from.data
 
-data_object_10 = myclass(array((10,10)))# Instantiate an object of type myclass
-data_object_a  = myclass(array((3,3)))  # Instantiate another one
+data_object_10 = myclass(n.array((10,10)))# Instantiate an object of type myclass
+data_object_a  = myclass(n.array((3,3)))  # Instantiate another one
 func_10 = myfunction(data_object_10)    # Instantiate myfunction which needs an
                                         # object arg having a member ".data"
 func_a = myfunction(data_object_a)      # One for a
@@ -610,7 +610,7 @@ print "This should print [10 10]", func_10() # Call the func_10
 print "This should print [3 3]", func_a()    # Similarly for func_a
 print "Now we modify the data objects and call the functions again"
 data_object_10.data = data_object_a.data
-data_object_a.data = array((5,5))
+data_object_a.data = n.array((5,5))
 print "This previously printed [10 10]", func_10() # Call the func_10
 print "This previously printed [3 3]", func_a()   # Similarly for func_a
 print "So everything is an object"
@@ -670,7 +670,6 @@ and position.
 @{
 """ Sparse matrix data structure, mimic mprodd """
 @< pycopyright @>
-from Numeric import *
 class sparsesquarematrix:
    def __init__(self,pointers=None,elements=None):
       self.pointers=pointers
@@ -684,11 +683,11 @@ class sparsesquarematrix:
 @{
 """ Sparse rectangular matrix """
 @< pycopyright @>
-from Numeric import *
+import Numeric as n
 class sparserectmatrix:
    def __init__(self,ntotal,ndense):
-       self.densrows=zeros(ndense,Float32)
-       self.sparse=zeros(ntotal-nsparse,Float32)
+       self.densrows=n.zeros(ndense,Float32)
+       self.sparse=n.zeros(ntotal-nsparse,Float32)
        self.ntotal=ntotal
    def dotproduct(self,i,vector):
        """Compute mat[:,i] .dot. vec """
@@ -808,14 +807,14 @@ need to do to define the interface. Here it is:
 @{
 """ Least squares optimiser object """
 @< pycopyright @>
-from Numeric import *
+import Numeric as n
 from LinearAlgebra import generalized_inverse, inverse
 
 class denseleastsquares:
    def __init__(self,nv):
       """ nv is the number of dense variables """
-      self.lsqA=zeros((nv,nv),Float)
-      self.rhs =zeros((nv)   ,Float)
+      self.lsqA=n.zeros((nv,nv),Float)
+      self.rhs =n.zeros((nv)   ,Float)
       self.chi =0.0
       self.nobs=0
       self.nv  =nv
@@ -844,11 +843,11 @@ class denseleastsquares:
             self.lsqA[i,i]*=damping
       scales=self.normalise()
       self.invA=inverse(self.norm)
-      self.shifts=matrixmultiply(self.invA,self.nr)
+      self.shifts=n.matrixmultiply(self.invA,self.nr)
       self.shifts=self.shifts/scales
       # Check if they solve the problem
-      leftover=matrixmultiply(self.lsqA,self.shifts)-self.rhs
-      moreshift=matrixmultiply(self.invA,leftover/scales)/scales
+      leftover=n.matrixmultiply(self.lsqA,self.shifts)-self.rhs
+      moreshift=n.matrixmultiply(self.invA,leftover/scales)/scales
       self.shifts=self.shifts+moreshift
       # no chi^2 correction to error bars here!
    def clean(self):
@@ -859,7 +858,7 @@ class denseleastsquares:
       self.chi=0.0
       # leave invA and esds
    def normalise(self):
-      s=zeros(self.nv,Float)
+      s=n.zeros(self.nv,Float)
       self.norm=self.lsqA.copy()
       self.norm.savespace(1)
       self.nr=self.rhs.copy()
@@ -885,7 +884,7 @@ polynomials.
 @{
 """ Computes a polynomial model to x,y data """
 @< pycopyright @>
-from Numeric import *
+import Numeric as n
 class polymodel:
    def __init__(self,degree,coefficients):
       """ Degree = number of coefficients + 1 
@@ -898,14 +897,14 @@ class polymodel:
    def compute(self,x):
       """ x - dependent variable val , compute gradients too """
       y=self.ai[0]
-      g=ones(self.degree+1,Float)
+      g=ones(self.degree+1,n.Float)
       for i in range(1,self.degree+1):
          y   = y + self.ai[i]*pow(x,i) 
          g[i]= pow(x,i)
       return y,g
 
 if __name__=="__main__":
-   p=polymodel(3,array([.1,.2,.3,.4],Float32))
+   p=polymodel(3,n.array([.1,.2,.3,.4],n.Float32))
    y,g = p.compute(3)
    print y,g
 @}
@@ -1085,7 +1084,7 @@ Base class for crystal structures
 Defines interface to the rest of linarp
 """
 @< pycopyright @>
-from Numeric import *
+
 class peak_array:
    """
    Minimally holds a Numeric array of peak positions (in Q=1/d**2)
@@ -1150,7 +1149,7 @@ Something for passing sparse matrices around is needed.
 Dummy structure for peak fitting
 """
 @< pycopyright @>
-from Numeric import *
+
 class pf_xtal(peak_array):
    def addpeaks(self,positions,intensities):
       """ Append further peaks """
@@ -1201,7 +1200,7 @@ Depends on personal taste I guess?
 @{
 """ Dataset object for powder data """
 @<pycopyright@>
-from Numeric import *
+import Numeric as n
 class powderdata:
    def __init__(self,x,y,e,d):
       """ x = x values, y = y values, e = errors, d = dictionary """
@@ -1222,8 +1221,8 @@ class powderdata:
          self.d["active_range"]=None
          self.npoints=self.x.shape[0]
       else:
-         l=searchsorted(self.xfull,lh[0])
-         h=searchsorted(self.xfull,lh[1])
+         l=n.searchsorted(self.xfull,lh[0])
+         h=n.searchsorted(self.xfull,lh[1])
          self.x=self.xfull[l:h]
          self.y=self.yfull[l:h]
          self.e=self.efull[l:h]
@@ -1302,7 +1301,7 @@ We'll make a little object for reading the files.
 """ Epf file reading object """
 @< pycopyright @>
 from powderdata import powderdata
-from Numeric import *
+import Numeric as n
 class epffile(powderdata):
    def __init__(self,filename,**kwargs):
       """ Reads a filename and hopes to get wavelength etc as optional args """
@@ -1316,7 +1315,7 @@ class epffile(powderdata):
       d["xunits"]="2theta"
       d["yunits"]="arbitrary"
       for key,val in kwargs.items(): d[key]=val
-      powderdata.__init__(self,array(x),array(y),array(e),d)
+      powderdata.__init__(self,n.array(x),n.array(y),n.array(e),d)
 @}
 
 \section{Reading GSAS files}
@@ -1339,7 +1338,7 @@ From http://www.cristal.org/powbase/add.html
 """ Powbase file reading object """
 @< pycopyright @>
 from powderdata import powderdata
-from Numeric import *
+import Numeric as n
 class powbase(powderdata):
    def __init__(self,filename,**kwargs):
       y=[]; e=[]; d={}
@@ -1358,13 +1357,13 @@ class powbase(powderdata):
          else:
             vals=map(float,line.split())
             for v in vals: y.append(v)
-      t=array(y,Float)
-      e=sqrt(y)
+      t=n.array(y,Float)
+      e=n.sqrt(y)
       d["wavelength"]=1.54036
       d["xunits"]="2theta"
       d["yunits"]="Counts"
       for key,val in kwargs.items(): d[key]=val
-      powderdata.__init__(self,array(x),array(y),array(e),d)
+      powderdata.__init__(self,n.array(x),n.array(y),n.array(e),d)
 @}
 
 \section{Reading MCA files}
@@ -1376,7 +1375,7 @@ This is an ESRF spec format with an MCA data array.
 """ MCA esrf spec file reader """
 @< pycopyright @>
 from powderdata import powderdata
-from Numeric import *
+import Numeric as n
 class mcadata(powderdata):
    def __init__(self,filename,**kwargs):
        y=[] ; e=[] ; d={}
@@ -1393,9 +1392,9 @@ class mcadata(powderdata):
              l=line[2:].split("\\")[0]
              nums=map(int,l.split() )
              y.extend(nums)
-       x=array(range(len(y)))
-       y=array(y)
-       e=sqrt(y+0.5) # Bayesian 0.5 to avoid zero errorbars
+       x=n.array(range(len(y)))
+       y=n.array(y)
+       e=n.sqrt(y+0.5) # Bayesian 0.5 to avoid zero errorbars
        powderdata.__init__(self,x,y,e,d)
 
  
@@ -1427,7 +1426,7 @@ array of that stream of bytes is given by the function below.
 @d readbytestream
 @{
 def readbytestream(file,offset,x,y,nbytespp,datatype='int',signed='n',
-                   swap='n',typeout=UInt16):
+                   swap='n',typeout=Numeric.UInt16):
    """
    Reads in a bytestream from a file (which may be a string indicating
    a filename, or an already opened file (should be "rb"))
@@ -1443,17 +1442,17 @@ def readbytestream(file,offset,x,y,nbytespp,datatype='int',signed='n',
    tin="dunno"
    len=nbytespp*x*y # bytes per pixel times number of pixels
    if datatype=='int' and signed=='n':
-      if nbytespp==1 : tin=UInt8
-      if nbytespp==2 : tin=UInt16
-      if nbytespp==4 : tin=UInt32
+      if nbytespp==1 : tin=Numeric.UInt8
+      if nbytespp==2 : tin=Numeric.UInt16
+      if nbytespp==4 : tin=Numeric.UInt32
    if datatype=='int' and signed=='y':
-      if nbytespp==1 : tin=Int8
-      if nbytespp==2 : tin=Int16
-      if nbytespp==4 : tin=Int32
+      if nbytespp==1 : tin=Numeric.Int8
+      if nbytespp==2 : tin=Numeric.Int16
+      if nbytespp==4 : tin=Numeric.Int32
    if datatype=='float':
-      tin=Float32
+      tin=Numeric.Float32
    if datatype=='double' :
-      tin=Float64
+      tin=Numeric.Float64
    if tin=="dunno" :
       raise SyntaxError, "Did not understand what type to try to read"
    opened=0
@@ -1464,9 +1463,11 @@ def readbytestream(file,offset,x,y,nbytespp,datatype='int',signed='n',
       f=file
    f.seek(offset)
    if swap=='y':
-      ar=array(reshape(byteswapped(fromstring(f.read(len),tin)),(x,y)),typeout)
+      ar=Numeric.array(Numeric.reshape(Numeric.byteswapped(
+             Numeric.fromstring(f.read(len),tin)),(x,y)),typeout)
    else:   
-      ar=array(reshape(fromstring(f.read(len),tin),(x,y)),typeout)
+      ar=Numeric.array(Numeric.reshape(
+             Numeric.fromstring(f.read(len),tin) ,(x,y)),typeout)
    if(opened):f.close()
    return(ar)
 @}
@@ -1553,7 +1554,7 @@ def readbruker(file):
    no=int(Header['NOVERFL'])        # now process the overflows
    if no>0:   # Read in the overflows
        # need at least Int32 sized data I guess - can reach 2^21
-       data=data.astype(UInt32)
+       data=data.astype(Numeric.UInt32)
        # 16 character overflows, 9 characters of intensity, 7 character position
        for i in range(no):
           ov=f.read(16)
@@ -1574,7 +1575,7 @@ A little script to test out our bruker reading capabilities...
 
 @o testbruker.py
 @{
-from Numeric import *
+import Numeric
 
 import imagereaders
 
@@ -1635,7 +1636,7 @@ def readid11edf(filename):
    datastring=f.read(int(hd["Size"]))
    f.close()
    # Convert datastring to Numeric array
-   if hd["DataType"]=="UnsignedShort": numerictype=UInt16
+   if hd["DataType"]=="UnsignedShort": numerictype=Numeric.UInt16
    else: 
       raise TypeError("Unimplemented edf filetype")
    if hd["ByteOrder"]=="LowByteFirst": 
@@ -1662,7 +1663,7 @@ the image and a dictionary of thing which were found in headers
     
 @< pycopyright @>
 
-from Numeric import *
+import Numeric
 
 @< makename @>
 @< readbytestream @>
@@ -2324,14 +2325,14 @@ we might need some extra functionality, which will be added here as needed.
 """ Correlated integrated intensity object for use in refinement """
 @< pycopyright @>
 
-from Numeric import *
+import Numeric as n
 import cii,pylibchol
 
 class ciidata:
    def __init__(self,ciiobject ,d):
       self.ciiobject=ciiobject   # A cii object as above
       self.d=d                   # Holds metadata in dictionary
-      self.x=self.xfull=array(range(self.ciiobject.ni)) 
+      self.x=self.xfull=n.array(range(self.ciiobject.ni)) 
                      # default to number of integrated intensities
       self.y=self.yfull=self.ciiobject.Ihkl
       self.npoints=self.ciiobject.ni
@@ -2348,18 +2349,18 @@ class ciidata:
          self.npoints=self.x.shape[0]
       else:         
          l=0 # always - not sure how to throw out low angle peaks yet
-         h=searchsorted(self.xfull,self.lh[1])
+         h=n.searchsorted(self.xfull,self.lh[1])
          self.x=self.xfull[l:h]
          self.y=self.yfull[l:h]
          self.d["active_range"]=[l,h]
          self.lh=[l,h]  
          self.npoints=self.x.shape[0]
    def weightmatvec(self,vector):
-      v=vector.astype(Float32)
+      v=vector.astype(n.Float32)
       return pylibchol.fmatvec(self.ciiobject.matrix,self.ciiobject.IP,v,self.npoints)
    def sinthetaoverlambda2(self,i):
       hkl=self.ciiobject.HKL[i]
-      return dot(hkl,matrixmultiply(self.d['rcm'],hkl))
+      return n.dot(hkl,n.matrixmultiply(self.d['rcm'],hkl))
    def setfsq(self,fsq):
       self.fsq=fsq # holds list of computed structure factors if available
 
@@ -2374,7 +2375,7 @@ and a pdbfile to get the structure factors.
 @{
 """ Data for refining a bulk solvent model """
 @< pycopyright @>
-from Numeric import *
+import Numeric as n
 import ciidata,cii
 from math import cos,pi
 from LinearAlgebra import inverse   
@@ -2384,19 +2385,20 @@ class solventrefinedata(ciidata.ciidata):
    def __init__(self,dilsfile, cclfile, pdbfile):
       ciiobj = cii.ciimatrix(dilsfile)
       fcalc = cctbxfcalc.getfcalcfrompdb(pdbfile,ciiobj.HKL.astype(Int).tolist())
-      fsq=abs(fcalc).astype(Float32)
+      fsq=abs(fcalc).astype(n.Float32)
       fsq=fsq*fsq*1e-6
       d={}
       c=open(cclfile,"r").readlines()
       for line in c:
          if line[0]=="C":
             [a,b,c,alpha,beta,gamma]=map(float,line[1:].split())
-      d['rm'] = array( [ [ a*a, a*b*cos(gamma*pi/180) , a*c*cos(beta *pi/180) ] ,
-                         [ a*b*cos(gamma*pi/180) , b*b, b*c*cos(alpha*pi/180) ] ,
-                         [ a*c*cos(beta *pi/180) , b*c*cos(alpha*pi/180) , c*c] ] )
-      d['rcm']= inverse(d['rm'])
+      d['rm'] = n.array( [ [ a*a, a*b*cos(gamma*pi/180) , a*c*cos(beta *pi/180) ] ,
+                           [ a*b*cos(gamma*pi/180) , b*b, b*c*cos(alpha*pi/180) ] ,
+                           [ a*c*cos(beta *pi/180) , b*c*cos(alpha*pi/180) , c*c] ] )
+      d['rcm']= n.inverse(d['rm'])
       ciidata.ciidata.__init__(self,ciiobj ,d)
       self.setfsq(fsq)
+
       
 @}
 
@@ -2479,7 +2481,7 @@ A simple class to implement a model is then:
 @o model.py
 @{
 @< pycopyright @>
-from Numeric import *
+import Numeric as n
 class model:
    """
    Intended as a base class for inheriting - you need to set up a list
@@ -2495,8 +2497,8 @@ class model:
          self.set[item]=False   # Indicate values have not been initialised
          i+=1
       # variable values and error bar array
-      self.vv=zeros(len(self.variables),Float32)
-      self.ve=zeros(len(self.variables),Float32)
+      self.vv=n.zeros(len(self.variables),n.Float32)
+      self.ve=n.zeros(len(self.variables),n.Float32)
       # Fill out any variable values which are present
       for key in kwds.keys():
          try: 
@@ -2540,7 +2542,7 @@ of variables being used and override the compute and gradient methods.
 @{
 @< pycopyright @>
 import modelclass
-from Numeric import *
+import Numeric as n
 class constantmodel(model):
    def __init__(self,**kwds):
       """ A single constant value, call constantmodel(constant=y) """
@@ -2548,10 +2550,10 @@ class constantmodel(model):
       model.__init__(**kwds)
 
    def compute(self,data):
-      self.ycalc=ones(data.y.shape,Float32)*self.vv[self.vd['constant']]
+      self.ycalc=n.ones(data.y.shape,n.Float32)*self.vv[self.vd['constant']]
 
    def gradient(self,variable):
-      return ones(self.ycalc.shape,Float32)
+      return n.ones(self.ycalc.shape,n.Float32)
 @}
 
 etc...
@@ -2632,7 +2634,7 @@ of statistical weights into the data object.
 """ Least squares optimisation for dense models and 1D weights """
 @< pycopyright @>
 import time
-from Numeric import *
+import Numeric
 from LinearAlgebra import generalized_inverse
 class densemodelfit:
    def __init__(self,model=None,data=None,marq=None):
@@ -2676,14 +2678,14 @@ class densemodelfit:
 # 1D              ge[:,i] = (self.model.gradient(self.variables[i]) / self.data.e).astype(Float32)
 # 1D        self.lsqmat=matrixmultiply(transpose(ge),ge)
 # 1D        self.rhs=matrixmultiply(obsminuscalc/self.data.e,ge)
-         g=zeros((self.data.npoints,self.nv),Float32)               # gradient array
+         g=Numeric.zeros((self.data.npoints,self.nv),Numeric.Float32)   # gradient array
          for i in range(self.nv):                        # avoid this somehow?
             g[:,i] = self.model.gradient(self.variables[i])
-         wg=zeros((self.data.npoints,self.nv),Float32)     # weighted gradient array
+         wg=Numeric.zeros((self.data.npoints,self.nv),Numeric.Float32)     # weighted gradient array
          for i in range(self.nv):
             wg[:,i] = self.data.weightmatvec(g[:,i])
-         self.rhs=matrixmultiply(obsminuscalc,wg)   
-         self.lsqmat=matrixmultiply(transpose(g).astype(Float),wg.astype(Float))
+         self.rhs=Numeric.matrixmultiply(obsminuscalc,wg)   
+         self.lsqmat=Numeric.matrixmultiply(Numeric.transpose(g),wg)
          # Error bars
          self.emat=self.generalized_inverse(self.lsqmat)
          # damping:
@@ -2692,11 +2694,11 @@ class densemodelfit:
                self.lsqmat[i,i] = self.marq*self.lsqmat[i,i]
          # invert to find shift (no need really...)
          self.inverse=self.generalized_inverse(self.lsqmat)
-         shifts = matrixmultiply(self.inverse,self.rhs).astype(Float32)
+         shifts = Numeric.matrixmultiply(self.inverse,self.rhs).astype(Numeric.Float32)
 # 1D          self.chi2=sum(obsminuscalc*obsminuscalc/self.data.e/self.data.e)
          self.chi2=sum(obsminuscalc* self.data.weightmatvec(obsminuscalc) )
          if self.data.npoints-self.nv > 0:
-         self.reducedchi2=self.chi2/(self.data.npoints-self.nv)
+            self.reducedchi2=self.chi2/(self.data.npoints-self.nv)
             self.emat=self.emat*self.reducedchi2
          else:
             self.reducedchi2=0. # No chi^2 correction here - it makes errors wrongly zero
@@ -2725,14 +2727,14 @@ class densemodelfit:
        # The idea is to make the diagonal of the matrix have equal elements
        # which is equivalent to making all variables be in units of ~1 esd
        try:
-       s=sqrt(diagonal(matrix))
+          s=Numeric.sqrt(Numeric.diagonal(matrix))
        except ValueError:
           print "Least squares matrices should always (by definition) have positive",\
                 "diagonal elements"
           print matrix
-          print diagonal(matrix)
+          print Numeric.diagonal(matrix)
           raise
-       mycopy=matrix.copy().astype(Float)
+       mycopy=matrix.copy()
        for i in range(matrix.shape[0]):
           if s[i]>0.:
              mycopy[i,:]=mycopy[i,:]/s[i]
@@ -2844,16 +2846,16 @@ a test dataset.
 @< pycopyright @>
 
 import model, densemodelfit
-from Numeric import *
+import Numeric as n
 class testmodelclass(model.model):
    def __init__(self,**kwds):
       self.variables = map(str, range(kwds['npoints']) )         
       model.model.__init__(self)
    def compute(self,data):
       self.ycalc=self.vv
-      self.g=zeros(self.vv.shape,Float32)
+      self.g=n.zeros(self.vv.shape,Float32)
    def gradient(self,variable):
-      g=zeros(self.vv.shape,Float32)
+      g=n.zeros(self.vv.shape,Float32)
       g[self.vd[variable]]=1.
       return g
 
@@ -2863,10 +2865,10 @@ class testdataclass:
       self.x=arange(3)
       self.y=RandomArray.random(3) # obs
       self.npoints=3
-      self.matrix = array( [[ 1.0, 1.0, 0.1] , [ 1.0, 1.0, 0.1] , [0.1, 0.1, 2.0 ] ], Float32)
+      self.matrix = n.array( [[ 1.0, 1.0, 0.1] , [ 1.0, 1.0, 0.1] , [0.1, 0.1, 2.0 ] ], Float32)
       self.d={}
    def weightmatvec(self,vec):
-      return matrixmultiply(self.matrix,vec)
+      return n.matrixmultiply(self.matrix,vec)
 
 if __name__=="__main__":
    m=testmodelclass(npoints=3)
@@ -2977,7 +2979,7 @@ static char docstring[] =
 /* c prototype */
 float profval_(float *eta,   float *gamma,  float *s_l,   float *d_l, 
                float *twoth, float *twoth0, float *dprdt, float *dprdg, 
-	            float *dprde, float *dprds,  float *dprdd, int *use_asym);
+               float *dprde, float *dprds,  float *dprdd, int *use_asym);
 
 /* to be called from python */
 static PyObject * profval (PyObject *self, PyObject *args)
@@ -2989,7 +2991,7 @@ static PyObject * profval (PyObject *self, PyObject *args)
    
    if(!PyArg_ParseTuple(args, "fffffffi", &eta, &gamma, &s_l, &d_l, 
                         &twoth, &twoth0, &use_asym, &area) )   return NULL;
-			
+         
    result=profval_(&eta, &gamma, &s_l, &d_l, &twoth, &twoth0, 
                    &dprdt, &dprdg, &dprde, &dprds, &dprdd, &use_asym);
 
@@ -3044,7 +3046,7 @@ static PyObject * profval_array (PyObject *self, PyObject *args)
 
    /* Loop over the data - all this crap to put a loop into c! */
    for(i=0; i<npts ; i++){
-	   twoth=(* (float *) (ttharray->data + i*ttharray->strides[0]) );
+      twoth=(* (float *) (ttharray->data + i*ttharray->strides[0]) );
       result=profval_(&eta, &gamma, &s_l, &d_l, &twoth, &twoth0, 
                       &dprdt, &dprdg, &dprde, &dprds, &dprdd, &use_asym);
       (* (float *) (result_a->data + i*result_a->strides[0])) = result*area;
@@ -3393,7 +3395,7 @@ the initial values if they are not present.
 @o profvalplusback.py
 @{
 @< pycopyright @>
-from Numeric import *
+import Numeric as n
 import model
 import profval
 class profvalplusback(model.model):
@@ -3427,8 +3429,8 @@ class profvalplusback(model.model):
       else:                return self.variables[0:5]
 
    def estimate(self,data):
-      xymax=argmax(data.y)
-      xymin=argmin(data.y)
+      xymax=n.argmax(data.y)
+      xymin=n.argmin(data.y)
       if not self.set['back']:
          self.vv[self.vd['back']]=data.y[xymin]
          self.set['back']=True
@@ -3436,7 +3438,7 @@ class profvalplusback(model.model):
          self.vv[self.vd['center']]=data.x[xymax]
          self.set['center']=True
       if not self.set['width']:
-      # have to walk array
+         # have to walk array
          halfway=0.5*(data.y[xymin]+data.y[xymax])
          i=xymax
          xl=data.x[0]
@@ -3452,7 +3454,7 @@ class profvalplusback(model.model):
             if data.y[i]<halfway:
                xh=data.x[i]
                break
-      self.vv[self.vd['width']] = abs(xl-xh)
+         self.vv[self.vd['width']] = abs(xl-xh)
          self.set['width']=True
       if not self.set['eta']:
          self.vv[self.vd['eta']]=0.5
@@ -3505,7 +3507,7 @@ class profvalplusback(model.model):
 
 import profvalplusback
 import densemodelfit
-         
+
 
 if __name__=="__main__":
    import epffile, powbase, mcadata, sys
@@ -3534,7 +3536,7 @@ if __name__=="__main__":
    while raw_input("More cycles?") != "":
       optimiser.refine(ncycles=1)
 @}
-
+ 
 
 \chapter{Peak center functions}
 
@@ -3822,7 +3824,7 @@ x,y array we want back.
 
 @D readfit2dspline
 @{
-from Numeric import *
+import Numeric as n
 import bisplev
    
 def readfit2dfloats(fp,n,debug=0):
@@ -3879,18 +3881,18 @@ def readfit2dspline(name):
    nx1=int(vals[0])
    ny1=int(vals[1])
    # Now follow fit2d formatted line 5E14.7
-   tx1=array(readfit2dfloats(fp,nx1),Float32)
-   ty1=array(readfit2dfloats(fp,ny1),Float32)
-   c1 =array(readfit2dfloats(fp,(nx1-4)*(ny1-4)),Float32)
+   tx1=n.array(readfit2dfloats(fp,nx1),n.Float32)
+   ty1=n.array(readfit2dfloats(fp,ny1),n.Float32)
+   c1 =n.array(readfit2dfloats(fp,(nx1-4)*(ny1-4)),n.Float32)
    line=fp.readline() #BLANK
    line=fp.readline() # Y-DISTORTION
    line=fp.readline() # two integers nx2, ny2
    vals=line.split()
    nx2=int(vals[0])
    ny2=int(vals[1])
-   tx2=array(readfit2dfloats(fp,nx2),Float32)
-   ty2=array(readfit2dfloats(fp,ny2),Float32)
-   c2 =array(readfit2dfloats(fp,(nx2-4)*(ny2-4)),Float32)
+   tx2=n.array(readfit2dfloats(fp,nx2),n.Float32)
+   ty2=n.array(readfit2dfloats(fp,ny2),n.Float32)
+   c2 =n.array(readfit2dfloats(fp,(nx2-4)*(ny2-4)),n.Float32)
    fp.close()
    tck1=(tx1,ty1,c1,kx,ky)
    tck2=(tx2,ty2,c2,kx,ky)
@@ -4101,16 +4103,16 @@ DAMAGE.
 # OTHER STUFF FROM THERE. 
 #
 import _splines
-from Numeric import *
+import Numeric as n
 
 def myasarray(a):
     if type(a) in [type(1.0),type(1L),type(1),type(1j)]:
-        return asarray([a])
+        return n.asarray([a])
     elif type(a) is ArrayType and len(a)==1:
         # Takes care of mapping array(number) to array([number])
-        return asarray([a[0]])
+        return n.asarray([a[0]])
     else:
-        return asarray(a)
+        return n.asarray(a)
 
 def bisplev(x,y,tck,dx=0,dy=0):
    """Evaluate a bivariate B-spline and its derivatives.
@@ -4204,10 +4206,10 @@ def bisplrep(x,y,z,w=None,xb=None,xe=None,yb=None,ye=None,kx=3,ky=3,task=0,s=Non
       representation.           
     """
     x,y,z=map(myasarray,[x,y,z])
-    x,y,z=map(ravel,[x,y,z])  # ensure 1-d arrays.
+    x,y,z=map(n.ravel,[x,y,z])  # ensure 1-d arrays.
     m=len(x)
     if not (m==len(y)==len(z)): raise TypeError, 'len(x)==len(y)==len(z) must hold.'  
-    if w is None: w=ones(m,'d')
+    if w is None: w=n.ones(m,'d')
     else: w=myasarray(w)
     if not len(w) == m: raise TypeError,' len(w)=%d is not equal to m=%d'%(len(w),m)
     if xb is None: xb=x[0]
@@ -6444,7 +6446,7 @@ def readipcnt(name):
    for l in data:
       x.append(float(l.split()[xcol]))
       y.append(float(l.split()[ycol]))
-   return array((x,y),Float32)
+   return n.array((x,y),n.Float32)
 @}
 
 \subsection{Generating an imagepro style blob file}
@@ -6459,7 +6461,7 @@ quick and dirty in python.
 @{
 import _connectedpixels
 
-from Numeric import *
+import Numeric as n
 
 @< readipcnt @>
 
@@ -6479,10 +6481,10 @@ def blobcounts(data,threshold):
 
 
 def blobproperties(data,index):
-   nblobs=maximum.reduce(ravel(index))
-   area=zeros(nblobs+1,Int)
-   cx=zeros(nblobs+1,Float)
-   cy=zeros(nblobs+1,Float)
+   nblobs=n.maximum.reduce(ravel(index))
+   area=n.zeros(nblobs+1,n.Int)
+   cx=n.zeros(nblobs+1,n.Float)
+   cy=n.zeros(nblobs+1,n.Float)
    for i in range(index.shape[0]):
       print "Processing row ",i,"\r",
       for j in range(index.shape[1]):
@@ -6544,7 +6546,8 @@ and usually goes wrong, so that won't happen till it works really really well
 and someone has more free time.
 
 @O indexingpeaks.py
-@{from Numeric import *
+@{
+import Numeric 
 
 big=99999999          # be afraid, be very afraid
 
@@ -6555,17 +6558,17 @@ def smallest(ar,n):
    Should be a Numeric thing to do this, it is only faster than
    sorting for very few numbers from very big arrays
    """
-   ret=zeros(n,Int)
-   m=minimum(ar.shape[0],n)
+   ret=Numeric.zeros(n,Numeric.Int)
+   m=Numeric.minimum(ar.shape[0],n)
    if(ar.shape[0] > 3*n*n):   # if less than 3n^2
-      x=maximum.reduce(ar)    # max in input
+      x=Numeric.maximum.reduce(ar)    # max in input
       for i in range(m):      
-         ret[i]=argmin(ar)    # get min and modify ar so we don't get it next time
+         ret[i]=Numeric.argmin(ar)    # get min and modify ar so we don't get it next time
          ar[ret[i]]=x+ar[ret[i]]
       for i in range(m):      # put the right numbers back
          ar[ret[i]]=ar[ret[i]]-x
    else:
-      t=argsort(ar)           # more elegant, but slower
+      t=Numeric.argsort(ar)           # more elegant, but slower
       ret[:m]=t[:m]   
    return ret
 
@@ -6578,8 +6581,8 @@ def findneighbours(xy,searchrange=-1):
    which correspond to the peaks in n.
    """
    r=searchrange         # search range variable
-   n=zeros( (9,xy.shape[1]) ,Int)      # result neighbours
-   dist=zeros( (9,xy.shape[1]), Float) # result distances
+   n=Numeric.zeros( (9,xy.shape[1]) ,Numeric.Int)      # result neighbours
+   dist=Numeric.zeros( (9,xy.shape[1]), Numeric.Float) # result distances
    for p in range(xy.shape[1]):
       x=xy[0,p] # x - coord
       y=xy[1,p] # y - coord
@@ -6589,20 +6592,20 @@ def findneighbours(xy,searchrange=-1):
       if r < 1:
          d=(xy[0,:]-x)**2+(xy[1,:]-y)**2   # compute distances to all peaks
          n[:,p]=smallest(d,9)  # for large arrays and few values this is faster
-         dist[1:,p]=sqrt(take(d,n[1:,p]))
+         dist[1:,p]=Numeric.sqrt(Numeric.take(d,n[1:,p]))
       else: # Hard to believe we can be so inefficient, use a search range...   
-         i=array(range(xy.shape[1]))
-         u=compress( xy[1,:]         < y+r , i )  # u now hold indices below y+r
-         u=compress( take(xy[1,:],u) > y-r , u )  # u now has indices above y-r
-         u=compress( take(xy[0,:],u) < x+r , u )  # now only where x < x+r
-         u=compress( take(xy[0,:],u) > x-r , u )  # now only where x > x-r
-         t=take(xy,u,1)                           # x,y data values
+         i=Numeric.array(range(xy.shape[1]))
+         u=Numeric.compress( xy[1,:]         < y+r , i )  # u now hold indices below y+r
+         u=Numeric.compress( take(xy[1,:],u) > y-r , u )  # u now has indices above y-r
+         u=Numeric.compress( take(xy[0,:],u) < x+r , u )  # now only where x < x+r
+         u=Numeric.compress( take(xy[0,:],u) > x-r , u )  # now only where x > x-r
+         t=Numeric.take(xy,u,1)                           # x,y data values
          d=(t[0,:]-x)**2+(t[1,:]-y)**2            # distance (squared)
          a=smallest(d,9)                          # pick out the small distances
-         n[:,p]=take(u,a[0:9])                    # what if d has fewer than 9 peaks?
-         dist[1:,p]=sqrt(take(d,a[1:9]))
+         n[:,p]=Numeric.take(u,a[0:9])                    # what if d has fewer than 9 peaks?
+         dist[1:,p]=sqrt(Numeric.take(d,a[1:9]))
       if (p+1)%100 == 0: # p is the peak being treated
-         ad=add.reduce(ravel(dist[1:,p-99:p]))/(8.*99)
+         ad=Numeric.add.reduce(Numeric.ravel(dist[1:,p-99:p]))/(8.*99)
          s="Found neighbours for %d peaks, average distance=%f pixels\r" % (p,ad)
          print s,
          # Use average distance *3 for adaptive search range
@@ -6645,11 +6648,11 @@ def getims(name):
    """
    xy=readipcnt(name)          # Imagepro's points
    n,d=findneighbours(xy)
-   ind=zeros(xy.shape,Int)+big # Will hold the i,j peak indexing 
+   ind=zeros(Numeric.xy.shape,Numeric.Int)+big # Will hold the i,j peak indexing 
    p=xy.shape[1]/2             # middle peak
    ind[0,p]=0 
    ind[1,p]=0
-   ad=add.reduce(ravel(d[1:,:]))/(8.*d.shape[1])
+   ad=Numeric.add.reduce(Numeric.ravel(d[1:,:]))/(8.*d.shape[1])
    todo=[]
    todo.append(p)
    i=0
@@ -6661,13 +6664,13 @@ def getims(name):
          print s,
       i=i+1
    print "\n"
-   print sum(where(ind[0,:]==big,1,0)),"peaks not assigned"
-   xm=minimum.reduce(where(ind[0,:]!=big,ind[0,:],big))
-   ym=minimum.reduce(where(ind[0,:]!=big,ind[1,:],big))
-   xr=maximum.reduce(where(ind[0,:]!=big,ind[0,:],0))-xm+1
-   yr=maximum.reduce(where(ind[0,:]!=big,ind[1,:],0))-ym+1
-   xpeakarray=zeros((xr,yr),Float32)
-   ypeakarray=zeros((xr,yr),Float32)
+   print Numeric.sum(Numeric.where(ind[0,:]==big,1,0)),"peaks not assigned"
+   xm=Numeric.minimum.reduce(Numeric.where(ind[0,:]!=big,ind[0,:],big))
+   ym=Numeric.minimum.reduce(Numeric.where(ind[0,:]!=big,ind[1,:],big))
+   xr=Numeric.maximum.reduce(Numeric.where(ind[0,:]!=big,ind[0,:],0))-xm+1
+   yr=Numeric.maximum.reduce(Numeric.where(ind[0,:]!=big,ind[1,:],0))-ym+1
+   xpeakarray=Numeric.zeros((xr,yr),Numeric.Float32)
+   ypeakarray=Numeric.zeros((xr,yr),Numeric.Float32)
    for i in range(ind.shape[1]):
       if ind[0,i]!=big:
          xpeakarray[ind[0,i]-xm,ind[1,i]-ym]=xy[0,i]
@@ -8272,7 +8275,7 @@ It will try to refine the overall scale and two solvent scattering parameters.
 @o solventmodel.py
 @{
 @< pycopyright @>
-from Numeric import *
+import Numeric as n
 import model
 class solventmodel(model.model):
    def __init__(self,**kwds):
@@ -8280,8 +8283,8 @@ class solventmodel(model.model):
       model.model.__init__(self,**kwds)
    def compute(self,data):
       # peak here needs to specify h,k,l,fcalc
-      self.ycalc=zeros(data.npoints,Float32)
-      self.gradients=zeros((data.npoints,3),Float32)
+      self.ycalc=n.zeros(data.npoints,n.Float32)
+      self.gradients=n.zeros((data.npoints,3),n.Float32)
       scale=self.vv[self.vd['scale']]
       A =   self.vv[self.vd['Asolv']]
       B =   self.vv[self.vd['Bsolv']]
@@ -8318,7 +8321,7 @@ if __name__=="__main__":
       print "Usage: %s ciifile cclfile pdbfile A_solv B_solv "%(sys.argv[0])
       print "Attempts to fit solvent scattering parameters"
       sys.exit()
-   
+
    ciidataobj=solventrefinedata.solventrefinedata(ciifile,cclfile,pdbfile)
    # estimate the scale factor:
    calc=sum(ciidataobj.fsq)
@@ -8708,7 +8711,9 @@ python.
 Most developed seems to the the matplotlib package 
 from John Hunter.
 
-A two dimensional tk based plotting widget from that package is
+A two dimensional tk based plotting widget from that package is.
+
+This was sort of hacked together at an early stage of developement.
 
 @o embedding_in_tk.py
 @{
@@ -8828,7 +8833,7 @@ class twodplot:
       self.optimiser.refine(ncycles=1)
       self.replot()
 
-   def estimate(self):
+   def estimate(self): 
       self.dat.setrange(self.a.get_xlim())
       self.model=profvalplusback.profvalplusback()
       self.optimiser=densemodelfit.densemodelfit(model=self.model,data=self.dat)
@@ -8844,7 +8849,7 @@ class twodplot:
       self.a.plot(self.dat.x,self.dat.y)
       if self.model != None:
          self.a.plot(self.dat.x,self.model.ycalc,'g')
-      middle=0.5*(yr[0]+yr[1])
+         middle=0.5*(yr[0]+yr[1])
          d = self.dat.y-self.model.ycalc
          d = d * self.dat.weightmatvec(d)
          d = d * abs(yr[0]-yr[1]) / Numeric.maximum.reduce(d)
@@ -8960,7 +8965,184 @@ if __name__=="__main__":
 
 @}
 
+\section{A more flexible gui for Linarp}
 
+Based on experience with various commercial programs and discussions
+with Alan Coehlo (author of Topas) it seems that making the gui
+completely separate from the code is a Good Thing. The aim is 
+to allow users to create objects, interact with or change them, use
+them to find useful things out, visualise the numbers they
+contain and finally save them to come back to later.
+So the gui needs to be a relatively thin wrapper to the various
+objects which are developed here. In order that users can find out
+how to use them, they need to supply their own operating instructions,
+via docstrings, much as they do for programmers who work via
+the command line. 
+
+The gui should be configurable for someone adding a new type of 
+object in the future and it ought to be fairly clear what the 
+gui expects to find in order to be able to "use" your object.
+
+Half of the objects we wish to create are going to be
+datasets, which are at least the powderdata class and
+a correlated intensity data class. The other half
+are the model objects, and to tie them together, some
+optmisation objects. As a developer, you will probably
+want to create and display a much wider range of things
+than the user, and these can be supplied as a separate list.
+We should group things by what they are functionally.
+
+Our gui should read a configuration file at run time giving
+a list of the objects which are available for creation. 
+Creating each object means knowing what it expects to be passed
+for its \_\_init\_\_ function. Displaying an object means
+knowing what it contains and how to draw that item on the screen.
+If a variable is a simple type (number, string etc) we can just
+display it. If it is an array we can plot or print it. If it is a list
+or a dictionary we can plop it up in an appropriate window (for
+editing). 
+
+A tree view widget gives a fairly logical way to draw most objects
+on the screen. Plotting  is then a question of selecting the
+x and y arrays from the selection of created objects.
+
+@o guiimports.py
+@{
+""" A list of the things which should be drawable """
+
+# Possible PowderPattern objects
+import powderdata
+import epffile
+import mcadata
+import powbase
+
+# Possible Intensity Objects
+#import shelx
+import ciidata
+
+# Models
+import solventmodel
+
+# Possible Fitting Objects
+import densemodelfit
+
+# Development Objects (likely to be longer)
+import Numeric
+
+@}
+
+So the gui starts up, reads the list of guiobjects
+and offers to create any one of them. So it has a 
+"create new" menu item, an "exit" menu item and
+a help menu to explain that you need to create something. 
+Upon deciding to create something new, for example
+powderdata, the gui needs to know all the possible
+things which are possible.
+
+So the gui pops up with a menu offering to create any of
+those things. It keeps a list of the things you have 
+created. This is loosely based on the guimaker.py
+example from Programming Python~\cite{pp2e}
+
+@o guimaker.py
+@{
+import sys
+from Tkinter import *
+
+class GuiMaker(Frame):   # Inherit from Tk frame
+   menuBar=[]
+   def __init__(self,parent=None):
+      Frame.__init__(self,parent)
+      self.pack(expand=YES, fill=BOTH)
+      self.start()                     # fills out menu design
+      self.makeMenuBar()
+      self.makeWidgets()
+   def makeMenuBar(self):
+      menubar = Menu(self.master)
+      self.master.config(menu=menubar)
+      for (name, key, items) in self.menuBar:
+         pulldown = Menu(menubar)
+         self.addMenuItems(pulldown,items)
+         menubar.add_cascade(label=name, underline=key, menu=pulldown)
+      pulldown = Menu(menubar)
+      pulldown.add_command(label="About" , command=self.help)
+      menubar.add_cascade(label="Help",menu=pulldown)
+
+   def addMenuItems(self, menu, items):
+      for item in items:
+         if item=="separator":
+            menu.add_separator({})
+         else:
+            menu.add_command(label = item[0], underline = item[1], command=item[2] )
+   def help(self):
+      from tkMessageBox import showinfo
+      showinfo("Help","Sorry, no help for " + self.__class__.__name__ + "\nPlease try harder")
+
+if __name__=="__main__":
+   menuBar = [
+    ( "File", 0,
+               [ ( "File", 0, lambda:0),
+                 ( "Quit", 0, sys.exit) ] ) ,
+    ( "Another Menu", 0, 
+               [ ( "Item", 0, lambda:0) ] ) ]
+   class TestGuiMaker(GuiMaker):
+      def start(self):
+         self.menuBar=menuBar
+      def makeWidgets(self):
+         import maketree, guiimports
+         f=maketree.ScrolledCanvas(self)
+         f.canvas.config(bg='white')
+         f.frame.pack(side=BOTTOM,expand=1,fill=BOTH)
+         item = maketree.linarptreeitem( ("guiimports",guiimports) )
+         node = maketree.TreeNode(f.canvas, None, item)
+         node.update()
+         node.expand()
+   root = Tk()
+   TestGuiMaker()
+   root.mainloop()
+@}
+
+Now we will try to work out how to take the guiobjects file and turn the lists
+in there into gui functionality. The python "inspect" module will help to do that.
+
+@o maketree.py
+@{
+
+import inspect, guiimports
+from idlelib.TreeWidget import TreeItem, TreeNode, ScrolledCanvas
+from types import ModuleType, ClassType
+from Tkinter import Frame
+
+class linarptreeitem(TreeItem):
+   def __init__(self,arg):
+      self.name=arg[0]
+      self.object=arg[1]
+   def GetText(self):
+      return self.name
+   def IsExpandable(self):
+      return type(self.object) in [ModuleType]
+   def GetSubList(self):
+      l=inspect.getmembers(self.object, inspect.ismodule)
+      l.extend( inspect.getmembers(self.object, inspect.isclass))
+      return [linarptreeitem(i) for i in l ]
+   def OnDoubleClick(self):
+      print "You just double clicked",self.name,self.object
+
+if __name__=="__main__":
+   from Tkinter import *
+   root=Tk()
+   Button(root, text='Quit', command=root.quit).pack(side=BOTTOM)
+   f=ScrolledCanvas(root)
+   f.canvas.config(bg='white')
+   f.frame.pack(side=BOTTOM,expand=1,fill=BOTH)
+   item = linarptreeitem( ("guiimports",guiimports) )
+   node=TreeNode(f.canvas, None, item)
+   node.update()
+   node.expand()
+   root.mainloop()
+
+
+@}
 
 \chapter{Technicalities}
 
