@@ -93,7 +93,6 @@ FIXME
 \item Add the "testdenseleastsquares.py" to automated testing framework
 \item Look into the inspect module for wrapping a gui to arbirary objects
 \item Make the testdenseleastsquares a class which is the basis for refinements?
-
 \item Split the peak fitting python thing into a 1D data weight matrix and 
       dense gradients optimiser
 \item Make a dense gradients function thing from the peak fitter.
@@ -102,6 +101,7 @@ FIXME
 \item Make a sparse gradients 1D data object for pattern decompositions
 \item Make the gui be constructed from a configuration file to have it
       easier to upgrade/change/modify etc.
+\item Do a big tidyup of this document for latexing it.
 \end{itemize}
 
 \section*{Index of file names}
@@ -1170,9 +1170,57 @@ class pf_xtal(peak_array):
       
 @}
 
+\section{Programming Utilities}
+
+Various things which did not fit in elsewhere.
+
+\subsection{Making histograms}
+
+A little thing which reads in a series of data, sorts them
+and writes out the mean, variance, and bin populations.
 
 
-
+@o histogrammer.py
+@{
+import sys,math
+try:
+  infile = open(sys.argv[1],"r")
+  binsize = int(sys.argv[2])
+except:
+  print "Usage: %s infile binsize"%(sys.argv[0])
+  print "Where infile contains data to be histogrammed in sigma nbins"
+data=[]
+sum=sumsq=0.
+n=0
+for line in infile.readlines():
+   data.append(float(line))
+   sum+=float(line)
+   sumsq+=float(line)*float(line)
+   n+=1
+data.sort()
+average=sum/n
+sigma=math.sqrt(sumsq/n - average*average)
+print "# Npoints = ",n
+print "# Average = ",average
+print "# sigma   = ",sigma
+bottom=data[0]
+top=data[-1]
+i=0
+lastbin=0
+binsum=0.
+binsize=(top-bottom)/binsize
+print "# Binsize = ",binsize
+for item in data:
+   bin=int((item-bottom)/binsize)
+   if bin==lastbin: 
+      i+=1
+      binsum+=item
+   else:
+      print binsum/i,lastbin,i
+      i=1
+      binsum=item
+   lastbin=bin
+@}
 \chapter{Input data formats}
 
 Reading raw datafiles from the many varied instruments which exist
@@ -2254,6 +2302,7 @@ with something else and get the rest of the functionality.
       print "Percentage full=",self.IP[-1]*100.0/self.ni/self.ni
       self.ciimat=None
       self.L=None
+      self.damp=0.1
       self.vecy=Numeric.zeros(self.nt,Numeric.Float32)
 @}
 
@@ -2306,8 +2355,8 @@ class ciimatrix:
       """
       Python implementation of the sparse matrix vector computation
       FIXME - I think this has a bug?
-      """
-      print "Dont do this - it is really slow"
+      """ 
+      print  "Dont do this - it is really slow"
       res=Numeric.zeros(vec.shape[0],Numeric.Float32)
       res[0]=self.matrix[0]*vec[0]
       print res.shape
@@ -2326,26 +2375,49 @@ class ciimatrix:
       self.vecy=vec.astype(Numeric.Float32)
       return pylibchol.fmatvec(self.matrix,self.IP,self.vecy,self.nt)
 
-   def solve(self,vec):
+   def solve(self,vec,cycles=0,positive=0):
       """
       Uses the Cholesky decomposition, hopefully formed already to solve
       A x = b via 
       L (L^T x) = b    => L y = b solved for y
       then L^T x = y   => solved for x
       Uses self.L and returns x for a given b
+
+      When A has zero diagonal elements then I am confused
       """
       if self.L==None: self.formchol()
-      return pylibchol.fsolve(self.L,self.IP,vec,self.nt)
-      
+      sol=pylibchol.fsolve(self.L,self.IP,vec.astype(Numeric.Float32),self.nt)
+      if cycles==0 and positive==0:
+         return sol
+      if cycles==0:
+         return Numeric.where(sol>0.,sol,0.)
+      for i in range(cycles):
+         # truncate
+         if positive!=0:
+            sol=Numeric.where(sol>0., sol, 0.)
+         err=vec-pylibchol.fmatvec(self.realmatrix,self.IP,sol,self.nt)
+         sol=sol+pylibchol.fsolve(self.L,self.IP,err.astype(Numeric.Float32),self.nt)
+      if positive!=0:
+         return Numeric.where(sol>0.,sol,0.)
+      else:
+         return sol   
    def formchol(self,damp=None):
       """
       Forms Cholesky decomposition in self.L
       """
+      self.mask=Numeric.ones(self.nt,Numeric.Float32)
       if damp==None:
          m=self.matrix
       else:
          m=self.matrix.copy()
-         for i in range(self.nt): m[self.IP[i]-1]*=(1.0+damp)
+         for i in range(self.nt): 
+            if m[self.IP[i]-1] <= 0.0:
+                # print i,self.IP[i],m[self.IP[i]-1]
+                m[self.IP[i]-1]=1.0
+                self.mask[i]=0.
+            m[self.IP[i]-1]*=(1.0+damp)
+      self.damp=damp
+      self.realmatrix=m.copy()
       self.L=pylibchol.fcholdc(m,self.IP,self.nt)
 
    def sparsechi2(self,vec):
@@ -2404,13 +2476,18 @@ if __name__=="__main__":
    t1=time.time()
    print "Time to read=",t1-t0
    print "\nSolving stuff\n"
-   testobject.formchol(damp=0.1)
+   testobject.formchol(damp=0.5)
    t2=time.time()
    print "Time to form Cholesky decomposition=",t2-t1
-   new=testobject.solve(test.fastmatvec(test.rhs)) # should give RHS back
-   print test.sparsechi2(new),new[:10],"...\n\t\t",new[-3:]
+   v=testobject.fastmatvec(testobject.rhs).astype(Numeric.Float32)
+   print "v",v[:10] , v[-10:]
+   print "M",testobject.matrix.shape,testobject.matrix[:10],testobject.matrix[-10:]
+   print "L",testobject.L.shape,testobject.L[:10],testobject.L[-10:]
+   new=testobject.solve(v) # should give RHS back
+   print "Chi2=",testobject.sparsechi2(new),new[:10],"...\n\t\t",new[-3:]
+   sys.exit()
    for i in xrange(10):
-      new=new+testobject.solve(test.fastmatvec(test.rhs-new))
+      new=new+testobject.solve(testobject.fastmatvec(testobject.rhs-new))
       print testobject.sparsechi2(new),new[:10],"...\n\t\t",new[-3:]
    omc=testobject.rhs-new
 
@@ -2469,6 +2546,7 @@ class sxdata(ciimatrix):
       self.ciimat=None
       self.L=None
       self.vecy=Numeric.zeros(self.nt,Numeric.Float32)
+
 @}
 
 
@@ -2518,6 +2596,9 @@ class ciidata:
 
 
    def setrange(self,lh=None): 
+      pass
+
+   def pleaseimplementsetrangeproperly(self):
       self.lh=lh
       if self.lh==None:
          self.x=self.xfull
@@ -2577,6 +2658,44 @@ class solventrefinedata(ciidata.ciidata):
       d['rcm']= inverse(d['rm'])
       ciidata.ciidata.__init__(self,ciiobj ,d)      
 @}
+
+\section{File series objects}
+
+Frequently we encounter experiments where some number of datasets are
+collected as a function of time/temperature/pressure etc. 
+We would like to be able to handle collections of patterns
+in more convenient ways.
+
+Applications for this object would be in generating things
+like rocking curves from images or doing sequential refinements
+on a series of powder patterns.
+In the case of image data we may need to be careful about
+memory usage.
+
+Need to think carefully how to do this!
+
+\chapter{Factor analysis and non parametric statistics}
+
+Given a pile of data, we would like to get some ideas about
+what is going on in that data quantitatively without actually
+knowing everything about the sample. 
+The idea is based on a powder pattern as being a linear 
+combination of contributions. 
+The contributions might be different crystallographic 
+phases, instrumental background, air scattering etc.
+
+We take a series of files from our file series object and
+ask for a 2D array of data. 
+One dimension of this array is the x-axis of diffraction
+pattern, the other is the time/temperature etc. 
+
+Numerically there might be good reasons for getting the mean
+subtracted off and normalising the data in some way.
+
+\section{The singular value decomposition}
+
+
+
 
 
 \chapter{Building models}
@@ -2851,17 +2970,22 @@ class densemodelfit:
          self.marq=marq
       self.fixlist=Numeric.zeros(self.nv,Numeric.Int)
 
-   def fix(self,variable):
-      try:
-         self.fixlist[self.variables.index(variable)]=1
-      except:
-         print variable,"not recognised"
+   def fix(self,*variables):
+      for variable in variables:
+         try:
+            self.fixlist[self.variables.index(variable)]=1
+         except:
+            print variable,"not recognised"
 
-   def vary(self,variable):
-      try:
-         self.fixlist[self.variables.index(variable)]=0
-      except:
-         print variable,"not recognised"
+   def vary(self,*variables):
+      for variable in variables:
+         try:
+            self.fixlist[self.variables.index(variable)]=0
+         except:
+            print variable,"not recognised"
+
+   def setmarq(self,marq):
+      self.marq=marq
 
    def refine(self, ncycles=1,quiet=0,debug=0):
       start=time.time()
@@ -3125,21 +3249,179 @@ and returns first derivatives of itself with respect to the intensities.
 The modified $\chi^2$ function is then:
 \[ \chi^2 =  \lambda \sum_{ij} (I_{o,i} - I_{c,i}) W_{ij} (I_{o,j} - I_{c,j}) + f(I_{c})  \]
 At a minimum:
-\[ \frac{d\chi^2}{d I_{c,i}} = 0 = -2 \lambda \sum_{j} W_{ij}(I_{o,j} - I_{c,j}) + 
+\[ \frac{d\chi^2}{d I_{c,i}} = 0 = - 2 \lambda \sum_{j} W_{ij}(I_{o,j} - I_{c,j}) + 
                                      \frac{df(I_{c})}{d I_{c,i}} \]
 This leads to a set of matrix equations to solve:
-\[  \mb{W I}_o - \frac{1}{\lambda} \frac{df(I_{c})}{d I_{c,i}} =  \mb{W I}_c \]
+\[  \mb{W I}_o^T - \frac{1}{\lambda} \frac{df(I_{c})}{d \mb{I}_{c}}^T =  \mb{W I}_c^T \]
 We need to determine a value for the lambda parameter.
+We can write $\mb{I}_c$ as:
+\[ \mb{I}_c^T = \mb{W}^{-1}\mb{W I}_o^T - \frac{\mb{W}^{-1}}{\lambda} \frac{df(I_{c})}{d \mb{I}_{c}}^T =
+   \mb{I}_o^T - \frac{1}{\lambda} \mb{W}^{-1}\frac{df(I_{c})}{d \mb{I}_{c}}^T    \]
+\[ \mb{I}_c =  \mb{I}_o - \frac{1}{\lambda} \mb{W}^{-1}\frac{df(I_{c})}{d \mb{I}_{c}}    \]
+The constraint on $\lambda$ is to be determined by deciding how much the 
+$\chi^2$ goodness of fit to the data can be increased. 
+So we substitute for $\mb{I}_c$ in the original $\chi^2$ function to 
+determine $\lambda$. viz:
+\[ \chi^2 = \sum_{ij} (I_{o,i} - I_{c,i}) W_{ij} (I_{o,j} - I_{c,j}) \]
+\[ \chi^2 =  (\mb{I}_{o} - \mb{I}_{c}) \mb{W} (\mb{I}_{o} - \mb{I}_{c})^T \]
+\[ \chi^2 = 
+ \left(\mb{I}_{o} - \left( \mb{I}_o - \frac{1}{\lambda} \mb{W}^{-1}\frac{df(I_{c})}{d \mb{I}_{c}}\right) \right)
+ \mb{W}     
+ \left(\mb{I}_{o} - \left( \mb{I}_o - \frac{1}{\lambda} \mb{W}^{-1}\frac{df(I_{c})}{d \mb{I}_{c,i}} \right)\right)^T \]
+The $\mb{I}_o$ cancels out leaving behind:
+\[ \chi^2 = 
+ \left( \frac{1}{\lambda} \mb{W}^{-1}\frac{df(I_{c})}{d \mb{I}_{c}}\right)
+ \mb{W}     
+ \left( \frac{1}{\lambda} \mb{W}^{-1}\frac{df(I_{c})}{d \mb{I}_{c}} \right)^T \]
+\[ \chi^2 = \frac{1}{\lambda^2} 
+ \mb{W}^{-1}\frac{df(I_{c})}{d I_{c,i}} \mb{W} \mb{W}^{-1}\left( \frac{df(I_{c})}{d I_{c,i}} \right)^T \]
+Since $\mb{W}$ is symmetric then $\mb{W}^T=\mb{W}$ and $(\mb{W}^{-1})^T=\mb{W}^{-1}$ so that we
+end up with an identity matrix:
+\[ \chi^2 = \frac{1}{\lambda^2} 
+ \mb{W}^{-1}\frac{df(I_{c})}{d I_{c,i}} \mb{I} \left( \frac{df(I_{c})}{d I_{c,i}} \right)^T \]
+\[ \chi^2 = \frac{1}{\lambda^2} 
+ \left( \mb{W}^{-1}\frac{df(I_{c})}{d I_{c,i}} \right)  \left( \frac{df(I_{c})}{d I_{c,i}} \right)^T \]
+Sadly we have no way of writing down $\mb{W}^{-1}$. We can try to replace the first vector by something
+else:
+\[ \left( \mb{W}^{-1}\frac{df(I_{c})}{d I_{c,i}} \right) = \mb{Y} \]
+\[ \frac{df(I_{c})}{d I_{c,i}}  = \mb{WY} \]
+We know how to solve that equation for $\mb{Y}$ via a Cholesky decomposition with
+diagonal damping. I am concerned that might bias the solution, but am quite a long
+way past caring as I write this. So if we know this magical vector $\mb{Y}$  then
+we can substitute it into the equation for $\chi^2$. 
+Then if we just decide on a $\chi^2$ target value we are done for setting $\lambda$.
 
-This can be done by selecting the actual value for the $\chi^2$ function
-which is to be used as a constraint.   
-Various pages on the web give methods for determining $\lambda$ for simple
-analytical functions.
-We want to find a general method when the constraint function is well behaved
-(does not depend on $I_c$) and also when it does depend on $I_c$, which might
-proceed iteratively.
+Better yet. Let's rearrange for $\lambda$ 
+\[ \lambda = \sqrt{ \frac{1}{\chi^2} 
+ \left( \mb{W}^{-1}\frac{df(I_{c})}{d I_{c,i}} \right)  \left( \frac{df(I_{c})}{d I_{c,i}} \right)^T } \]
+Giving:
+\[ \mb{I}_c =  \mb{I}_o - \frac{\mb{W}^{-1}\frac{df(I_{c})}{d \mb{I}_{c}}}{\sqrt{ \frac{1}{\chi^2} 
+ \left( \mb{W}^{-1}\frac{df(I_{c})}{d I_{c,i}} \right)  \left( \frac{df(I_{c})}{d I_{c,i}} \right)^T }
+}     \]
+If you followed that then I can only apologise. Simpler it is:
+\[ \mb{I}_c =  \mb{I}_o - \frac{\mb{Y}}{\sqrt{ \frac{\mb{Y} \left( \frac{df(I_{c})}{d I_{c,i}} \right)^T}{\chi^2}  }
+}     \]
 
-For starters we will go through some different target functions.
+Now for an object which can try to do those calculations. Interestingly it 
+looks like it depends only on the derivative of the function and not
+on the actual values. If the function has constant derivatives which
+do not depend on $\mb{I}_c$ then theoretically it is a one step
+process. Deeply attractive.
+
+@o chooser.py
+@{
+""" 
+Chooses particular vectors of intensity from a correlated set
+"""
+@< pycopyright @>
+import cii
+import Numeric,math,pylibchol
+class chooser(cii.ciimatrix):
+   """
+   Inherits the ciimatrix functionality. Create one from a dils file?
+   """
+   def __init__(self,filename):
+      cii.ciimatrix.__init__(self,filename)
+      self.ichosen=self.Ihkl.copy()
+      self.nt = self.ni # truncate while developing - make augmented arrays later
+
+   def choose(self,dfdi, chi2=None):
+      """
+      Attempts to choose a particular vector of integrated intensities
+      from the set which fit the data
+      dfdi is the derivative of some function with respect to the 
+           current ichosen values. 
+      If chi^2 is not supplied then the value is determined to give ?
+      """
+      # First determine Y
+      if self.damp < 0.1 or self.L==None:
+         self.formchol(damp=0.1)
+      y = self.solve( dfdi, cycles=30 )
+      bottom = Numeric.dot(y,dfdi)
+      if chi2 == None:
+         chi2=1.
+#      print "Bottom thing = sqrt{",bottom,"/",chi2,"} making chi^2=",chi2
+      s = 1./math.sqrt(bottom/chi2)
+      self.ichosen=self.Ihkl + y*s
+#      print "In theory the chi^2 for self.ichosen should be 1 now"
+      diff = (y*s).astype(Numeric.Float32)
+      c = Numeric.dot(diff,pylibchol.fmatvec(self.realmatrix,self.IP,diff,self.nt))
+
+      if False:
+       print "It comes out as ",c
+       if abs(chi2 - c) < 0.01 :
+          print "It works, yippee!!!"
+       else:
+          raise Exception("The chooser failed you, I am sorry")
+       print "max and min chosen",Numeric.maximum.reduce(self.ichosen),Numeric.minimum.reduce(self.ichosen)
+
+@}
+
+
+To test out the chooser class we will make a chooser object and compute some
+vectors of derivatives to test it on. 
+
+@o testchooser.py
+@{
+
+import sys,chooser,Numeric
+c = chooser.chooser(sys.argv[1])
+import RandomArray
+dfdi = RandomArray.random(c.Ihkl.shape)
+for i in range(10):
+  chi2=10**(-i)
+  c.choose(dfdi,chi2)
+  print chi2,Numeric.sum(dfdi*c.Ihkl),
+  print Numeric.sum(dfdi*c.ichosen),Numeric.maximum.reduce(c.ichosen),Numeric.minimum.reduce(c.ichosen)
+ 
+
+@}
+
+Now we will go through some different target functions.
+
+\subsection{Check some silly maths details}
+
+\[ \chi^2 =  \lambda \sum_{ij} (I_{o,i} - I_{c,i}) W_{ij} (I_{o,j} - I_{c,j}) + f(\mb{I}_{c}) =
+             \lambda ( \mb{I}_o - \mb{I}_c ) \mb{W} ( \mb{I}_o - \mb{I}_c )^T + f(\mb{I}_c) \]
+\[ \chi^2 =  \lambda (\mb{I}_o \mb{W} \mb{I}_o^T  - \mb{I}_o  \mb{W} \mb{I}_c^T
+                                                 - \mb{I}_c  \mb{W} \mb{I}_o^T +  \mb{I}_c\mb{W}\mb{I}_c^T)
++ f(\mb{I}_c) \]
+If we propose that $ \mb{I}_o  \mb{W} \mb{I}_c^T =  \mb{I}_c  \mb{W} \mb{I}_o^T $, since $\mb{W}$ is
+symmetric, then we can simplify. Also $\mb{I}_o$ are fixed and therefore
+we can assign a $c=\mb{I}_o \mb{W} \mb{I}_o^T$ and $ \mb{y} = \mb{I}_o \mb{W} $, giving:
+\[ \chi^2 =  \lambda (c - 2\mb{y I}_c^T + \mb{I}_c\mb{W}\mb{I}_c^T )
++ f(\mb{I}_c) \]
+\[ \chi^2 =  \lambda (c - 2 \sum_i y_i I_{c,i} + \sum_{ij} I_{c,i}W_{ij}I_{c,j} )
++ f(\mb{I}_c) \]
+Now to differentiate (dropping the "c" subscripts which are no longer needed:
+\[ \frac{\chi^2}{dI_i} =  \lambda \left( - 2  y_i  + \frac{d}{dI_i}\left(\sum_{ij} I_{i}W_{ij}I_{j}\right) \right)
++ \frac{df(\mb{I})}{dI_c} \]
+\[ \frac{d}{dI_i}\left(\sum_{ij} I_{i}W_{ij}I_{j}\right) =  ?\]
+Terms with $i=j$ have to be treated differently to those with $i\neq j$? 
+Rewrite the sum as:
+\[ \sum_{ij} I_{i}W_{ij}I_{j} = \sum_i I_i W_{ii} I_i + \sum_{i\neq j} I_i W_{ij} I_j \]
+
+bugger it.
+
+\[ \sum_{ij} I_{i}W_{ij}I_{j} = 
+ \left( \begin{array}{ccc}  a  &  b  &  c \end{array} \right)
+ \left( \begin{array}{ccc} 11  & 12  & 13 \\ 
+                           21  & 22  & 23 \\
+                           31  & 32  & 33 \end{array} \right)
+ \left( \begin{array}{ccc}  a \\  b \\  c \end{array} \right) \]
+\[ \sum_{ij} I_{i}W_{ij}I_{j} = 
+  \begin{array}{cccccc} a11a &+& a12b &+& a13c &+ \\
+                        b21a &+& b22b &+& b23c &+ \\
+                        c31a &+& c32b &+& c33c & \end{array}   \]
+\[ \frac{d}{da} \sum_{ij} I_{i}W_{ij}I_{j} = 
+  \begin{array}{cccccc} a11 + 11a & + & 12b & + & 13c & + \\
+                        b21 & + &  \\
+                        c31 & + & \end{array}   \]
+Since $12 = 21$ etc:
+\[ \frac{d}{da} \sum_{ij} I_{i}W_{ij}I_{j} = 2 ( 11a + 12b + 13c) \]
+After that I am now convinced that:
+\[ \frac{d}{dI_i} \sum_{ij} I_{i}W_{ij}I_{j} = \sum_{j} W_{ij}I_{j} \]
+
 
 \subsection{Minimise the sum of intensity squared}
 
@@ -3177,11 +3459,136 @@ model bias in anything you then go on to do with them.
 \[ f(I(hkl)) = \sum \frac{ (I_o - I_c)^2 }{ \sigma^2} \]
 Here the $\sigma$ is a weighting to apply to a particular
 intensity - probably coming from the model.
-\[ \frac{f(I(hkl))}{I(hkl)} =  \frac{ -2(I_o - I_c)} { \sigma^2} \]
+\[ \frac{df(I(hkl))}{dI(hkl)} =  \frac{ -2(I_o - I_c)} { \sigma^2} \]
 Alternatively you can flip a sign and then maximise this 
 r-factor to get away from a particular set of intensities.
 
-\subsection{Maxmise a correlation coefficient}
+We will neglect the term to be added on the diagonal of the 
+least squares matrix as it is going to mean modifying our
+Cholesky decomposition, which we do not want to do!
+
+@o rffunctor.py
+@{
+@< pycopyright @>
+import Numeric,math
+class rffunctor:
+   def __init__(self,imodel,match=1,weights=None):
+      """ R-factor perturbation function """
+      self.imodel=imodel
+      self.weights=weights
+      if weights != None:
+         wm=Numeric.maximum.reduce(weights)
+         self.weights=Numeric.where(weights > wm/10. , weights, wm/10.)
+      self.match=match
+   def compute(self,icalc):
+      d=self.imodel-icalc
+      if self.weights==None:
+         f = Numeric.sum(d*d)
+         df = 2*d
+      else:
+         f = Numeric.sum(d*d*self.weights)
+         df = 2*d*self.weights
+      print "rffunctor",f
+      if self.match==1:
+         return f,df
+      else:
+         return f,-df
+
+def test(ciifile,cclfile,pdbfile,Asolv,Bsolv,lamb):
+   import ciidata,solventrefinedata,solventmodel,ichooser
+   import densemodelfit
+   import time
+   import Numeric
+   ciidataobj=solventrefinedata.solventrefinedata(ciifile,cclfile)
+   ciidataobj.ciiobject.nt=ciidataobj.ciiobject.ni
+   model =  solventmodel.solventmodel(pdbfile,Asolv=Asolv,Bsolv=Bsolv,scale=1.0)
+   model.set_hkls(ciidataobj.get_hkls())
+   model.compute(ciidataobj)
+   print "First peaks",model.ycalc[:10]
+   optimiser = densemodelfit.densemodelfit(model=model,data=ciidataobj )
+   optimiser.fix("Asolv","Bsolv")
+   optimiser.refine(ncycles=3,quiet=0)
+   model.compute(ciidataobj)
+   print "Model first peaks",model.ycalc[:10]
+   print "Data  first peaks",ciidataobj.y[:10]
+   rffunctorobject = rffunctor(ciidataobj.y.copy(),match=1,weights=ciidataobj.ciiobject.diagonal())
+   ichooserobject  = ichooser.ichooser(ciidataobj , rffunctorobject, lamb)
+   for i in range(10):
+      ichooserobject.cycle()
+      print "choos first peaks",ichooserobject.icalc[:10]
+      print "cycle",i, "functor=", ichooserobject.f, "chi^2=", ichooserobject.chi2
+   # Now have a look at the chosen icalc, originals and functor score for each
+   f_old,df = rffunctorobject.compute(model.ycalc.copy())
+   f_new,df = rffunctorobject.compute(ichooserobject.icalc)
+   obsminuscalc=model.ycalc - ciidataobj.y
+   chi2old=Numeric.sum(obsminuscalc * ciidataobj.weightmatvec(obsminuscalc) )
+   obsminuscalc=ichooserobject.icalc - ciidataobj.y
+   chi2new=Numeric.sum(obsminuscalc * ciidataobj.weightmatvec(obsminuscalc) )
+   print "Old f=",f_old,"f_new=",f_new,"chi2old=",chi2old,"chi2new=",chi2new
+
+if __name__=="__main__":
+   # test - read the command line arguments and use the functions
+   import sys
+   try:
+      ciifile = sys.argv[1]
+      cclfile = sys.argv[2]
+      pdbfile = sys.argv[3]
+      Asolv   = float(sys.argv[4])
+      Bsolv   = float(sys.argv[5])
+      lamb    = float(sys.argv[6])
+   except:
+      print "Usage: %s ciifile cclfile pdbfile A_solv B_solv lambda"%(sys.argv[0])
+      print "Computes correlation coefficients for models"
+      sys.exit()
+   test(ciifile,cclfile,pdbfile,Asolv,Bsolv,lamb)
+
+@}
+
+
+\subsection{Maximise the Patterson Entropy}
+
+A long long time ago the author spent a very long time thinking 
+and reading about this sort of thing. 
+The upshot of all that was a visit to Glasgow and the use of
+Chris Gilmore's MICE program as it seems like a fundamentally
+nasty problem.
+Nevertheless, some ideas did surface. 
+One point was that if the Patterson function (or indeed any other)
+is a linear function of the intensities, the optimisation problem
+is not that bad.
+
+The Patterson entropy is defined as (something vaguely like):
+\[ S(P) = \sum_{xyz} P(xyz) \log(P(xyx)) \]
+where $P(xyz)$ is made an acceptable probability (sums to one,
+strictly positive).
+I had so many problems with that part that I pretty much gave
+up on the idea and wondered if there was ever a reason
+to consider the Patterson function squared. 
+Certainly any function should be independant of the $F(000)$ 
+reflection so that this must be invarient under addition of 
+a constant to the Patterson function.
+Thinking further along those lines - you might turn a Patterson 
+or indeed electron density function on it's side and look at the
+distribution of values in the function in order to assign a probability
+to a particular value.
+I think this was done in recent years and L-shaped distributions
+result from  principle of minimum charge (FIXME - reference it properly -
+V. Elser - Acta A, phasing quasicrystals)
+
+In any case... there is a bit of maths which is worth jotting down
+for future reference.
+The entropy has a simple(ish) derivative with respect to the
+values in a pixel at $xyz$.
+So we have:
+\[ \frac{dS}{dP(xyz)} = \log(P(xyz))-1 \]
+Now the Patterson pixel values are given by:
+\[ P(xyz) = \sum_{hkl} I(hkl)\exp(2\pi (hx+ky+lz)) \]
+We want to know the derivative of the entropy function 
+with respect to intensity, so we use the chain rule to 
+convert $dS/dI = dS/dP . dP/dI $ and $dP/dI$ is easy:
+\[ \frac{dP}{dI} \]
+
+\subsection{Maximise a correlation coefficient}
 
 If a partial model is available, or you are attempting to position
 and orient a molecule in a unit cell, the correlation coefficient
@@ -3201,8 +3608,147 @@ matrix used to orient the molecule before carrying out the sum.
 
 In this case we will assume the orientation is fixed and just try to 
 optimise the set of intensities to maximise this function.
+The derivative of this is beautifully constant irrespective of 
+the values of the calculated intensities. 
+An issue remains with making the function independent of a scale 
+factor.
+I prefer to define:
+\[ R(C) = \frac{\sum_{p} F^2_m(Cp)F^2_2(p)}
+               {\sum_{p} F^2_m(Cp)\sum_{p} F^2_2(p)   } \]
 
 
+
+The target functor is then:
+
+@o ccfunctor.py
+@{
+@< pycopyright @>
+import Numeric,math
+class ccfunctor:
+   def __init__(self,imodel):
+      """ Correlation coefficient perturbation function """
+      self.imodel=imodel
+      self.sumofmodelsq=Numeric.sum(self.imodel*self.imodel)
+      self.sumofmodel  =Numeric.sum(self.imodel)
+      self.syy=self.sumofmodelsq - self.sumofmodel*self.sumofmodel/self.imodel.shape[0]
+   def compute(self,icalc):
+#      print type(icalc),type(imodel)
+      self.sumofcalcsq=Numeric.sum(icalc*icalc)
+      self.sumofcalc=Numeric.sum(icalc)
+      sxx=self.sumofcalcsq - self.sumofcalc*self.sumofcalc/icalc.shape[0]
+      sxy=Numeric.sum(icalc * self.imodel) - self.sumofmodel*self.sumofcalc/icalc.shape[0]
+      f=math.sqrt(sxy*sxy/sxx/self.syy)
+      print "Functor scores",f
+      df = Numeric.zeros(self.imodel.shape)
+      return f, df
+
+def test(ciifile,cclfile,pdbfile,Asolv,Bsolv,lamb):
+   import ciidata,solventrefinedata,solventmodel,ichooser
+   import densemodelfit
+   import time
+   import Numeric
+   ciidataobj=solventrefinedata.solventrefinedata(ciifile,cclfile)
+   ciidataobj.ciiobject.nt=ciidataobj.ciiobject.ni
+   model =  solventmodel.solventmodel(pdbfile,Asolv=Asolv,Bsolv=Bsolv,scale=1.0)
+   model.set_hkls(ciidataobj.get_hkls())
+   model.compute(ciidataobj)
+   print "First peaks",model.ycalc[:10]
+   optimiser = densemodelfit.densemodelfit(model=model,data=ciidataobj )
+   optimiser.fix("Asolv","Bsolv")
+   optimiser.refine(ncycles=3,quiet=0)
+   model.compute(ciidataobj)
+   print "Model first peaks",model.ycalc[:10]
+   print "Data  first peaks",ciidataobj.y[:10]
+   ccfunctorobject = ccfunctor(model.ycalc.copy())
+   ichooserobject  = ichooser.ichooser(ciidataobj , ccfunctorobject, lamb)
+   for i in range(10):
+      ichooserobject.cycle()
+      print "cycle",i, "functor=", ichooserobject.f, "chi^2=", ichooserobject.chi2
+   # Now have a look at the chosen icalc, originals and functor score for each
+   f_old,df = ccfunctorobject.compute(model.ycalc.copy())
+   f_new,df = ccfunctorobject.compute(ichooserobject.icalc)
+   obsminuscalc=model.ycalc - ciidataobj.y
+   chi2old=Numeric.sum(obsminuscalc * ciidataobj.weightmatvec(obsminuscalc) )
+   obsminuscalc=ichooserobject.icalc - ciidataobj.y
+   chi2new=Numeric.sum(obsminuscalc * ciidataobj.weightmatvec(obsminuscalc) )
+   print "Old f=",f_old,"f_new=",f_new,"chi2old=",chi2old,"chi2new=",chi2new
+
+if __name__=="__main__":
+   # test - read the command line arguments and use the functions
+   import sys
+   try:
+      ciifile = sys.argv[1]
+      cclfile = sys.argv[2]
+      pdbfile = sys.argv[3]
+      Asolv   = float(sys.argv[4])
+      Bsolv   = float(sys.argv[5])
+      lamb    = float(sys.argv[6])
+   except:
+      print "Usage: %s ciifile cclfile pdbfile A_solv B_solv lambda"%(sys.argv[0])
+      print "Computes correlation coefficients for models"
+      sys.exit()
+   test(ciifile,cclfile,pdbfile,Asolv,Bsolv,lamb)
+
+@}
+
+\subsection{The ``choosing'' intensities optimisation problem}
+
+We have the computed intensities and other nuisance parameters
+as the variables to be optimised in the problem.
+\[  \mb{W I}_o - \frac{1}{\lambda} \frac{df(I_{c})}{d I_{c,i}} =  \mb{W I}_c \]
+The matrix W is known and $I_o$ are fixed so that we get:
+\[ \mb{I}_c = \mb{W}^{-1} \left( \mb{W I}_o - \frac{1}{\lambda} \frac{df(I_{c})}{d I_{c,i}} \right) \]
+To compute the derivative of $f$ we might have to start somewhere.
+Either it will be constant and not dependant on $I$ or we will
+have to cycle around recomputing. 
+A reasonable starting point would generally appear to be $\mb{I}_o$.
+
+Somehow the $\lambda$ parameter is going to have to be dealt with, as 
+well as the lack of existence of $\mb{W}^{-1}$. We already have a route
+to get around the lack in inverse problem with the sequential
+damped systems. Somehow we will need to vary the $\lambda$ parameter
+and make some decision about how large the perturbation is to be.
+Perhaps it can be related back to the original pattern $\chi^2$ or
+decided in some statistically meaningful sense. 
+
+The things we want then are to compute a set of $\mb{I}_c$ values
+as a function of $\lambda$. We would like to plot out the progress
+of the optimisation in terms of the fit of these values to each
+function and also plot out the variations w.r.t lambda.
+
+@o ichooser.py
+@{
+""" Chooses particular sets of integrated intensities from a CII set """
+@< pycopyright @>
+import Numeric
+class ichooser:
+   def __init__(self, ciiobject, functor, lamb):
+      """ 
+      ciiobject is the set of intensities to work with (can be diagonal!)
+      functor is the function which we use to choose - supplies f(I) and df(I)/dI
+      lambda is a weighting parameter
+      """
+      self.ciiobject=ciiobject
+      self.functor  =functor
+      self.lamb     =lamb
+      self.icalc    =ciiobject.y.copy() # initial values are Iobs
+#      self.icalc    =functor.imodel.copy() # initial values are Iobs
+      self.ciiobject.ciiobject.formchol(damp=0.5) # hack
+      self.W_Ic     =self.ciiobject.weightmatvec(self.ciiobject.y)
+
+   def cycle(self):
+      """
+      Tries to improve the Icalc set by performing a 'refinement' cycle on them
+      """
+      f , df = self.functor.compute(self.icalc)
+      rhs = self.W_Ic + df/self.lamb
+      self.ciiobject.ciiobject.nt=rhs.shape[0] # hack
+      self.icalc = self.ciiobject.ciiobject.solve(rhs,cycles=5)
+      self.f, df = self.functor.compute(self.icalc)
+      obsminuscalc=self.ciiobject.y - self.icalc
+      self.chi2=Numeric.sum(obsminuscalc * self.ciiobject.weightmatvec(obsminuscalc) )
+
+@}
 
 \chapter{Peakshapes}
 
@@ -8760,7 +9306,9 @@ class translator:
          self.f += self.ztfcalc[:,k]*(n.cos(hrd)+1j*n.sin(hrd))
       self.fsq=n.absolute(self.f) # abs of complex numbers
       self.fsq=self.fsq*self.fsq  # ...squared
+      # Derivatives of fsq with respect to dx,dy,dz??
       if __debug__: 
+         # print this shafts you badly for speed!
          self.shiftedstructure=self.structure.apply_shift(translation)
          # Check for special position problems
          assert self.shiftedstructure.special_position_indices().size()==0 , ["Special positions",
@@ -8924,6 +9472,104 @@ Which co-ordinate system is used for the transformation might
 eventually be important, but for now we will just note that
 all rotations can be represented by a rotation matrix
 and we will expect a suitable matrix to be specified.
+
+So the point is to place the molecule in space group P1 and
+compute on a large grid. 
+Then if an atom was at a position $x,y,x$ it will be rotated
+to position $x',y',z'$ by the rotation matrix $\mb{R}$.
+
+\subsection{Representing rotations as quaternions}
+
+A brief aside which was trawled from the web to get to grips
+with this rotation matrix stuff. This is from
+http://www.sjbrown.co.uk/quaternions.html
+
+A complex number can be represented as a point in the
+2D plane of an Argand diagram. 
+The concept can be extended to something called a ``quaternion''
+which has $q = w + xi + yj + zk $ and lives in four 
+dimensional space.
+The dimensions $i,j,k$ are related to real numbers and each other
+by the following: 
+\[ i^2 = j^2 = k^2 = -1 \]
+\[ ij = k \]
+These quaternion beasts can be viewed as a vector space and
+added and subtracted component wise as for complex numbers.
+They have a norm, which is given by:
+\[ N(q) = \sqrt{ w^2+x^2+y^2+z^2} \]
+Multiplication is not commutative:
+\[ q_1q_2 \neq q_2q_1 \]
+...but can be written as:
+\[ q_1q_2 = [w_1,v_1] [ w_2,v_2] = [w_1w_2 - v_1 . v_2 , w_1v_2 + w_2v_1  + v_1\times v_2 ] \]
+where $\times$ is the cross product.
+Conjugates can be defined analogously to the complex conjugates:
+\[ q^* = (w, -x, -y, -z) \]
+...and:
+\[ q q^* = N(q)^2 \]
+So that:
+\[ \frac{1}{q} = \frac{q^*}{N(q)^2} \]
+... which means we can also divide the quaternions.
+Exponentials and logarithms can also be defined, but I have yet to see why.
+
+The point of this is to represent rotations, where we have a vector
+being multiplied by a matrix to get a new vector $y = A x$ where
+A is the rotation matrix.  To be a rotation matrix then $A$ has
+to be ``orthonormal'', but unfortunately that can be difficult
+to precisely ensure numerically. 
+There are nine entries in the $3\times3$ matrix and only $3$ degrees
+of freedom. 
+By using quaternions there are only four degrees of freedom, making the
+last one which is the orthonormality constraint easier to enforce.
+
+A rotation of $\theta$ about a unit axis $w$ is represented by
+a quaternion:
+\[ q = [\cos(\theta/2), w.sin(\theta/2) ] \]
+Using this scheme should make $N(q)=1$.
+To rotate a vector $v$ an angle $\theta$ about an arbitrary axis $w$ 
+you use the formula:
+\[ v' = w(v.w) + (v - w(v.w))\cos(\theta) + (v\times w)sin(\theta) \]
+But in terms of quaternions this is:
+\[ [0,v'] = q.[0,v].q^* \]
+Which is simpler for some people. Apparently.  
+What is nice is that rotations can be chained together using $r=pq$ so
+that when the quaternion $r$ is applied, this is the same as applying
+$q$ followed by $p$. The order is important.
+
+If a quaternion $q=(w,x,y,z)$ is to be converted to matrix form
+the equation to use is:
+
+\[ R = \left( \begin{array}{ccc}
+1 - 2y^2- 2z^2 &  2xy - 2wz       & 2zx + 2wy \\
+2xy + 2wz      & 1 - 2x^2 - 2z^2  & 2yz - 2wx \\
+2zx - 2wy      &  2yz + 2wx       & 1 - 2x^2 - 2y^2  \\
+\end{array}
+\right) \]
+
+\subsubsection{SLERP}
+
+SLERP stands for ``Spherical Linear Interpolation''.
+The idea is to have two orientations and move smoothly between them
+by having a variable $t$ which ranges between zero and one as you move
+from one orientation to another. The equation to use is
+\[ q= (b.a^{-1})^t a \]
+For $t=0$ or $t=1$ then $q=a$ or $q=b$ as requested.
+Since $t$ is real the equation can be simplified to:
+\[ r^t = [\cos(t\theta), w.\sin(t\theta) ] \] 
+for $ r=[\cos(\theta), w.\sin(\theta) ] $.
+This is apparently a ``jerky'' unsophisticated way to move your
+camera between different orientations. One can go further
+by using something called spherical cubic interpolations which
+is the equivalent of a Bezier curve through a set of points in
+comparison to a line segement.
+
+\subsubsection{Optimal sampling of the rotation function}
+
+Fortunately Lattman has tackled to problem of generating
+lists of orientations for testing and we turn to that work
+to get our orientations. The reference is:
+Acta Cryst B28, 1065, (1972).
+
+
 
 
 \section{Solvent scattering}
@@ -9946,7 +10592,7 @@ class GuiMaker(Frame):   # Inherit from Tk frame
             menu.add_command(label = item[0], underline = item[1], command=item[2] )
 
 if __name__=="__main__":
-
+   import translatorgui, rotatorgui
    def help():
       from tkMessageBox import showinfo
       showinfo("Help","Sorry, no help for you!\nPlease try harder")
@@ -9975,6 +10621,10 @@ if __name__=="__main__":
                            ( "Fitting", 2, 
                               [ ( "Fit 1 peak", 4, self.fitpeak)  ,
                                 ( "Fit Solvent Scattering", 4, self.fitsolvent) ] ) ,
+                           ( "MR", 0,
+                              [ ( "Load pdb file for model", 0, self.loadpdb) ,
+                                ( "Translation function", 0, self.translationfn) ,
+                                ( "Rotation function", 0, self.rotationfn) ] ) ,
                            ( "Help", 0, 
                               [ ( "Help Me!", 0, help) ,
                                 ( "Credits" , 0, credits) ] ) ]
@@ -9982,6 +10632,25 @@ if __name__=="__main__":
          self.plotitems=[]
          self.updateplot()
  
+      def loadpdb(self):
+         self.pdbfile=self.opener.show(title="Name of PDB file please")
+         
+      def translationfn(self):
+         # find solventrefinedata in self.plotitems
+         try: 
+            p=self.pdbfile
+            popup=translatorgui.translatorgui(parent=Toplevel(),pdbfile=self.pdbfile, data = self.plotitems[-1])
+         except:
+            raise
+
+      def rotationfn(self):
+         # find solventrefinedata in self.plotitems
+         try: 
+            p=self.pdbfile
+            popup=rotatorgui.rotatorgui(parent=Toplevel(),pdbfile=self.pdbfile, data = self.plotitems[-1])
+         except:
+            raise
+
       def printplot(self): self.twodplotter.printplot()
 
       def openxye(self):
@@ -10022,18 +10691,18 @@ if __name__=="__main__":
          self.updateplot()
 
       def fitsolvent(self):
-         data=self.plotitems[0]             # Active data set from tree
+         data=self.plotitems[-1]             # Active data set from tree
          r = self.twodplotter.a.get_xlim()
          data.setrange(r)
          p = self.opener.show( title="Name of PDB file please")
          model=guiimports.solventmodel(p,Asolv=0.9, Bsolv=20, scale=1.0)    # Choose a peak shape here
          model.set_hkls(data.get_hkls())
-         calc=sum(model.fsq)
-         obs= sum(data.ciiobject.Ihkl)
-         s = obs/calc
-         model.set_value('scale',s) 
-         optimiser=guiimports.densemodelfit(data=data,model=model,marq=2)
-         optimiser.refine(ncycles=10)
+         optimiser=guiimports.densemodelfit(data=data,model=model)
+         optimiser.fix("Asolv","Bsolv")
+         optimiser.refine(ncycles=1)
+         optimiser.vary("Asolv","Bsolv")
+         optimiser.setmarq(1.5)
+         optimiser.refine(ncycles=5)
          d={"title" : "Calculated", "color" : "g"}
          self.plotitems.append(guiimports.powderdata(data.x, model.ycalc, None, d))
          d={"title" : "Difference", "color" : "r"}
@@ -10387,6 +11056,199 @@ if __name__=="__main__":
    print objectcreator(baz)
 @}
 
+\section{Translator and rotator gui interfaces}
+
+Takes a model and data and decides what to compute.
+
+@o rotatorgui.py
+@{
+@< pycopyright @>
+
+import translatorgui
+class rotatorgui(translatorgui.translatorgui):
+    def __init__(self,*args,**kwds):
+       translatorgui.translatorgui.__init__(self,*args,**kwds)
+
+@}
+
+@o translatorgui.py
+@{
+@< pycopyright @>
+
+from Tkinter import *
+import tkFileDialog, tkMessageBox, tkSimpleDialog
+import time,Numeric
+import solventrefinedata, translatedsolventmodel, densemodelfit
+
+class translatorgui(Frame):
+   def __init__(self,parent=None,pdbfile=None,data=None,A=0., B=0.):
+      Frame.__init__(self,parent)
+      self.opener=tkFileDialog.Open()
+      self.saver=tkFileDialog.SaveAs()
+      self.data=data
+      self.pdbfile=pdbfile
+      self.A=A
+      self.B=B
+      self.out="tf.dat"
+      self.x=[0.,0.,0.]
+      self.structurelabel = Label(self,text="Structure is: %s"%(self.pdbfile))
+      self.structurelabel.pack(side=TOP)
+      self.structurebutton= Button(self,text="Select structure",command=self.changepdbfile)
+      self.structurebutton.pack(side=TOP)
+      self.datalabel= Label(self,text="Data is %s"%(self.data))
+      self.datalabel.pack(side=TOP)
+      self.databutton=Button(self,text="Select data",command=self.changedata)
+      self.databutton.pack(side=TOP)
+      self.outlabel= Label(self,text="Output goes to %s"%(self.out))
+      self.outlabel.pack(side=TOP)
+      self.outbutton=Button(self,text="Select outputfile",command=self.changeout)
+      self.outbutton.pack(side=TOP)
+      self.solventlabel = Label(self,text="Solvent model A=%f, B=%f"%(self.A,self.B))
+      self.solventlabel.pack(side=TOP)
+      self.diagonal=Button(self,text="Make diagonal",command=self.diagonal).pack(side=TOP)
+      self.varyA = IntVar()
+      self.varyB = IntVar()
+      Checkbutton(self,text="Vary A",variable=self.varyA).pack(side=TOP)
+      Checkbutton(self,text="Vary B",variable=self.varyB).pack(side=TOP)
+     
+      Button(self,text="Set A",command=self.setA).pack(side=TOP)
+      Button(self,text="Set B",command=self.setB).pack(side=TOP)
+      self.positionlabel=Label(self,text="Current position x=%f y=%f z=%f"%(self.x[0],self.x[1],self.x[2]))
+      self.positionlabel.pack(side=TOP)
+      Button(self,text="Fit at current position",command=self.fitcurrent).pack(side=TOP)
+      Button(self,text="Translate fit",command=self.translatefit).pack(side=TOP)
+      Button(self,text="Close",command=self.quit).pack(side=TOP)
+      self.pack()
+      self.model=None
+      if self.pdbfile!=None:
+         self.model = translatedsolventmodel.translatedsolventmodel(self.pdbfile,Asolv=self.A,Bsolv=self.B,scale=1.0)
+         if self.data != None:
+            self.model.set_hkls(self.data.get_hkls())
+            print "Got hkls into model"
+
+   def changepdbfile(self):
+      self.pdbfile=self.opener.show(title="Name of PDB file please")
+      self.structurelabel.config(text="Structure is: %s"%(self.pdbfile))
+      self.model = translatedsolventmodel.translatedsolventmodel(self.pdbfile,Asolv=self.A,Bsolv=self.B,scale=1.0)
+      if self.data != None:
+         self.model.set_hkls(self.data.get_hkls())
+         print "Got hkls into model"
+
+   def changedata(self):
+      self.d = self.opener.show( title="Name of DILS file please")
+      self.c = self.opener.show( title="Name of CCL file please")
+      self.data = solventrefinedata.solventrefinedata(self.d,self.c)
+      self.datalabel.config(text="Structure is: %s"%(self.data))
+      if self.model != None:
+         self.model.set_hkls(self.data.get_hkls())
+         print "Got hkls into model"
+
+   def diagonal(self):
+      # Make self.data diagonal
+      print dir(self.data)
+      w=self.data.ciiobject.diagonal()
+      self.data.ciiobject.matrix=w.astype(Numeric.Float32)
+      self.data.ciiobject.IP=Numeric.array(range(1,w.shape[0]),Numeric.Int32)
+
+
+   def changeout(self):
+      self.out = self.saver.show( title="Name of output file please")
+      self.outlabel.config(text="Output goes to %s"%(self.out))
+
+   def setA(self):
+      self.A=tkSimpleDialog.askfloat("Solvent scattering A", "Electron density of solvent",
+                                     initialvalue=self.A, minvalue=0, maxvalue=100)
+      self.solventlabel.config(text="Solvent model A=%f, B=%f"%(self.A,self.B))
+    
+   def setB(self):
+      self.B=tkSimpleDialog.askfloat("Solvent scattering B", "Thermal factor of solvent", 
+                                     initialvalue=self.B, minvalue=0, maxvalue=1000)
+      self.solventlabel.config(text="Solvent model A=%f, B=%f"%(self.A,self.B))
+      
+   def fitcurrent(self):
+      self.model.set_translation(self.x) 
+      print "Set the translation"
+      self.positionlabel.config(text="Current position x=%f y=%f z=%f"%(self.x[0],self.x[1],self.x[2]))
+      self.model.set_value("Asolv",self.A)
+      self.model.set_value("Bsolv",self.B)
+      print "Set the scale factor"
+      self.optimiser = densemodelfit.densemodelfit(model=self.model,data=self.data)
+      print "Set up the optimiser"
+      self.optimiser.fix("Asolv")
+      self.optimiser.fix("Bsolv")
+      self.optimiser.refine(ncycles=3,quiet=0)   
+      self.minchi2=self.optimiser.chi2
+      self.minx=self.x
+      if self.varyA.get() + self.varyB.get() != 0:
+         self.optimiser.setmarq(1.5)
+         if self.varyA.get()!=0:
+           self.optimiser.vary("Asolv")
+         if self.varyB.get()!=0:
+           self.optimiser.vary("Bsolv")
+         self.optimiser.refine(ncycles=5,quiet=0)
+         self.minchi2=self.optimiser.chi2
+         self.minx=self.x
+         self.A=self.model.get_value("Asolv")
+         self.B=self.model.get_value("Bsolv")
+         self.solventlabel.config(text="Solvent model A=%f, B=%f"%(self.A,self.B))
+
+   def translatefit(self):
+      try: 
+         junk=self.minchi2
+      except:
+         self.fitcurrent()
+      r1=self.getrange("x")
+      r2=self.getrange("y")
+      r3=self.getrange("z")
+      results=Numeric.zeros( (len(r1),len(r2),len(r3)) , Numeric.Float)
+      npoints=len(r1)*len(r2)*len(r3)
+      outfile=open(self.out,"w")
+      if tkMessageBox.askyesno("Are you sure?","%d points to compute"%(npoints)):
+         start=time.time()
+         self.progresslabel=Label(self,text="Starting fit")
+         self.progresslabel.pack(side=TOP)
+         self.progresslabel.update_idletasks()
+         self.optimiser.fix("Asolv")
+         self.optimiser.fix("Bsolv")
+         i=j=k=n=0
+         for x in r1:
+            for y in r2:
+               for z in r3:
+                  self.model.set_translation([x,y,z]) 
+                  self.optimiser.refine(ncycles=2,quiet=1)   
+                  results[i,j,k]=self.optimiser.chi2
+                  print i,j,k,x,y,z,self.optimiser.chi2
+                  outfile.write("%d %d %d %f %f %f %f\n"%(i,j,k,x,y,z,self.optimiser.chi2))
+                  k=k+1
+                  n=n+1
+                  if self.optimiser.chi2 < self.minchi2:
+                     self.minchi2=self.optimiser.chi2
+                     self.x=[x,y,z]
+               line=time.time()-start
+               if line > 1.:
+                  self.progresslabel.config(text="%d points processed in %s seconds"%(n,line))
+                  self.progresslabel.update_idletasks()
+               j=j+1 ; k=0
+            i=i+1 ; j=0 ; k=0
+         outfile.close()
+
+   def getrange(self,var):
+      low=tkSimpleDialog.askfloat("Low value for %s"%var,"low",initialvalue=0)
+      high=tkSimpleDialog.askfloat("High value for %s"%var,"high",initialvalue=1)
+      steps=tkSimpleDialog.askinteger("Number of steps for %s"%var,"steps",initialvalue=10)
+
+      r=[ x*(high-low)/steps+low for x in range(steps) ]
+      print r
+      return r
+
+if __name__=="__main__":
+   root = Tk()
+   gui = translatorgui(root)
+   root.mainloop()
+
+
+@}
+
 \section{Scripting}
 
 The gui should be fully scriptable, so that any actions which are carried out
@@ -10457,12 +11319,12 @@ setup(name = 'profval',
       author_email = 'wright@@esrf.fr',
       ext_modules = [m])
 
-os.system('g77 -c -O2 libchol.f')              # Nasty hack - needs g77 on path 
-os.system('ar -cr libchol.a libchol.o')   # assume libprofval.a link compatible
-
+os.system('df  /c /nodebug /fast libchol.f')              # Nasty hack - needs g77 on path 
+#os.system('ar -cr libchol.a libchol.obj')   # assume libprofval.a link compatible
+os.system('copy libchol.obj libchol.o')
 
 n = Extension("pylibchol", sources = ['pylibchol.c'], 
-               libraries=['chol'], library_dirs=['.'])
+               extra_objects=['libchol.obj'], library_dirs=['.'])
 
 
 setup(name = 'pylibchol',
