@@ -2376,7 +2376,7 @@ class ciidata:
       hkl=self.ciiobject.HKL[i]
       return n.dot(hkl,n.matrixmultiply(self.d['rcm'],hkl))
    def get_hkls(self):
-      return self.ciiobject.HKL.astype(n.Int).tolist()
+      return self.ciiobject.HKL[:self.npoints].astype(n.Int).tolist()
 @}
   
 
@@ -8223,12 +8223,82 @@ we can use to get the P1 structure.
 We then need to compute the structure factors for the symmetry related 
 molecules from the structure factors from the P1 structure. For simple
 rotations we know that the hkl's can just be transformed. For rotations
-and translations combined the situation is more difficult. We could make 
-a structure for each of the symmetry operators?
+and translations combined the situation is more messy.
+The symop applied to hkl gives h'k'l' for the rotation. 
+Then add on the translation as normal.
+A class which computes an internal list of $F(hkl)$ for the structure in P1
+and can then add on the translation components will do all this, I hope.
 
-The symop applied to hkl gives h'k'l' for the rotation. Then add on the translation
-as normal.
+@o translator.py
+@{
+from cctbx import sgtbx
+from cctbx.array_family import flex
+from iotbx.pdb.xray_structure import from_pdb
 
+import getsymops, cctbxfcalc
+import Numeric as n
+from LinearAlgebra import inverse
+from math import pi,sin,cos,pow
+
+
+class translator:
+   """ Compute structure factors for a structure plus a translation """
+   def __init__(self,pdbfile):
+      """ Pass a pdbfile to treat """
+      self.structure   = from_pdb(pdbfile)
+      self.p1structure = self.structure.asymmetric_unit_in_p1()
+      self.symops = getsymops.getsymops(str(self.structure.space_group_info()))
+
+   def set_hkls(self,hkls):
+      self.hkls=n.array(hkls)
+      # make fcalc arrays for hkls rotated by each symop and add on translation after
+      self.ztfcalc = n.zeros( (len(hkls),len(self.symops.keys()))   ,n.Complex)
+      self.truefcalc=cctbxfcalc.getfcalc(hkls,self.structure)
+      self.keys=self.symops.keys()
+      for k in range(len(self.keys)):
+         m=inverse(n.transpose(self.symops[self.keys[k]][:3,:3]))
+         t=self.symops[self.keys[k]][3,:]
+         self.newhkls=n.transpose(n.matrixmultiply(m,n.transpose(self.hkls))).astype(n.Int)
+         self.ztfcalc[:,k] = cctbxfcalc.getfcalc(self.newhkls.tolist(),self.p1structure) # Molecular transform
+         # Add phase factor
+         for i in range(self.hkls.shape[0]):
+            phi = 2*pi*n.dot(self.newhkls[i,:],-t)
+            self.ztfcalc[i,k] *= (cos(phi)+sin(phi)*1j)
+      # get fcalc for the sum of the two
+      for i in range(self.hkls.shape[0]):
+         fc=sum(self.ztfcalc[i,:])
+         f=self.truefcalc[i] 
+         assert (abs(fc-f) < 1e-6) , [self.hkls[i,:], fc, f, abs(fc-f), "Components",
+             self.ztfcalc[i,:] ]
+#         print  self.hkls[i,:], fc, f, abs(fc-f)
+
+
+
+if __name__=="__main__":
+   import sys
+   import translator
+   t=translator.translator(sys.argv[1])
+
+   structure = from_pdb(sys.argv[1])
+
+   fc = structure.structure_factors(d_min=float(sys.argv[2]),)
+   hkls=flex.to_list(fc.miller_set().indices())
+#   import solventrefinedata
+#   d=solventrefinedata.solventrefinedata("test\myo\myo.dil","test\myo\myo.ccl")
+#   d.setrange([0,100])
+   t.set_hkls(hkls)
+
+@}
+
+After some fiddling around it looks like the new miller indices
+for the peak after application of the reciprocal space symmetry
+operator combined with the negative translational part do the
+trick. FIXME You are going to justify that. Getting it to
+work for P63212 is not enough, it'll bugger up somewhere eventually.
+
+Adding on a further translation then means a phase factor
+on the first component, and some other phase factor on
+the other components.
 
 
 \subsection{Orientational components}
@@ -8310,11 +8380,12 @@ import model
 import cctbxfcalc
 class solventmodel(model.model):
    def __init__(self,pdbfile,**kwds):
+      self.pdbfile=pdbfile
       self.variables=['scale','Asolv','Bsolv']
       model.model.__init__(self,**kwds)
 
    def set_hkls(self,hkls):  
-      fcalc = cctbxfcalc.getfcalcfrompdb(pdbfile,hkls)
+      fcalc = cctbxfcalc.getfcalcfrompdb(self.pdbfile,hkls)
       fsq=abs(fcalc).astype(n.Float32)
       self.fsq=fsq*fsq*1e-6
 
@@ -8485,12 +8556,12 @@ class ftrans:
    def __init__(self,symbol):
       """ Pass a space group symbol string """
       self.s = getsymops.getsymops(symbol)
-   def ftrans(h,f):
+   def ftrans(self,h,f):
       t={}
       for k in self.s.keys():
-         m=s[k]
+         m=self.s[k]
          # convert hkl,                        Phase factor
-         t[k]=[n.matrixmultiply(m[:3,:3],h)],2.*pi*n.dot(h,m[3,:])
+         t[k]=[n.matrixmultiply(m[:3,:3],h).astype(n.Int),2.*pi*n.dot(h,m[3,:])]
       return t
 
 if __name__=="__main__":
@@ -8509,10 +8580,37 @@ if __name__=="__main__":
    sfc       =structuref.f_calc()
    sfcd      =flex.to_list(sfc.data())
    hkl       =flex.to_list(sfc.indices())
+   # these are  P1
    for i in range(len(sfcd)):
-      print hkl[i],sfcd[i]
+      print hkl[i],sfcd[i],object.ftrans(hkl[i],sfcd[i])
 
 @}
+
+This gives the new reflection and the phase factor to apply. 
+We will take this code over to the section on translation functions
+and extend the object to be a more general thing which takes a
+structure in the constructor and can compute structure factors
+in a relatively efficient way for a given translation.
+
+\section{Space group absences}
+
+I think the algorithm used in CCSL is roughly as follows:
+
+\begin{itemize}
+\item See if symmetry transforms a reflection into itself
+\item If it does apply the translational part of the symmetry operator
+\item Reflection is absent if the translated hkl is not integer modulo 1
+\end{itemize}
+
+FIXME: This needs to be implemented and checked. For disgusting hexagonal
+spacegroups.
+
+\section{Generation of equivalent Reflections}
+
+Whether or not Friedel's law holds (anomalous diffraction or not)
+decides whether $(h,k,l)$ and $(-h,-k,-l)$ are equal. Application
+of symmetry operators generates the rest of the equivalents. 
+
 
 \chapter{Restraints}
 
@@ -9239,8 +9337,7 @@ if __name__=="__main__":
       def opensrd(self):
          d = self.opener.show( title="Name of DILS file please")
          c = self.opener.show( title="Name of CCL file please")
-         p = self.opener.show( title="Name of PDB file please")
-         self.plotitems.append(guiimports.solventrefinedata(d,c,p))
+         self.plotitems.append(guiimports.solventrefinedata(d,c))
          self.updateplot()
 
 
@@ -9262,10 +9359,13 @@ if __name__=="__main__":
          data=self.plotitems[0]             # Active data set from tree
          r = self.twodplotter.a.get_xlim()
          data.setrange(r)
-         calc=sum(data.fsq)
+         p = self.opener.show( title="Name of PDB file please")
+         model=guiimports.solventmodel(p,Asolv=0.9, Bsolv=20, scale=1.0)    # Choose a peak shape here
+         model.set_hkls(data.get_hkls())
+         calc=sum(model.fsq)
          obs= sum(data.ciiobject.Ihkl)
          s = obs/calc
-         model=guiimports.solventmodel(Asolv=0.8, Bsolv=20, scale=s)    # Choose a peak shape here
+         model.set_value('scale',s) 
          optimiser=guiimports.densemodelfit(data=data,model=model,marq=2)
          optimiser.refine(ncycles=10)
          d={"title" : "Calculated", "color" : "g"}
