@@ -2675,7 +2675,7 @@ class densemodelfit:
       else:
          self.marq=marq
 
-   def refine(self, ncycles=1):
+   def refine(self, ncycles=1,quiet=0):
       start=time.time()
       end=self.icyc+ncycles
       while self.icyc < end: 
@@ -2710,24 +2710,25 @@ class densemodelfit:
             self.emat=self.emat*self.reducedchi2
          else:
             self.reducedchi2=0. # No chi^2 correction here - it makes errors wrongly zero
-         print "Cycle ",self.icyc," chi^2 = ",self.chi2, "Reduced chi^2=",self.reducedchi2
+         if quiet==0:
+            print "Cycle ",self.icyc," chi^2 = ",self.chi2, "Reduced chi^2=",self.reducedchi2
          for item in self.variables:
             self.model.apply_shift(item,shifts[self.vd[item]])
          self.icyc+=1
       #
       # End cycles loop
-      print "Variable  Value           Esd             Shift           Shift/esd"
-      for item in self.variables:
-         i=self.vd[item]
-         e=math.sqrt(self.emat[i,i])
-         self.model.set_errorbar(item,e)
-         print "%8s  %-10.7e"%( item,self.model.get_value(item)),
-         if e>0.:
-            print " %-10.7e  %-10.7e  %-10.7e"%(e, shifts[i] , shifts[i]/e )
-         else:
-            print " %-10.7e  %-10.7e  NaN"%(e, shifts[i] )
-#      print "Lsq Matrix", self.lsqmat
-      print "Time for that cycle was:",time.time()-start
+      if quiet==0: 
+         print "Variable  Value           Esd             Shift           Shift/esd"
+         for item in self.variables:
+            i=self.vd[item]
+            e=math.sqrt(self.emat[i,i])
+            self.model.set_errorbar(item,e)
+            print "%8s  %-10.7e"%( item,self.model.get_value(item)),
+            if e>0.:
+               print " %-10.7e  %-10.7e  %-10.7e"%(e, shifts[i] , shifts[i]/e )
+            else:
+               print " %-10.7e  %-10.7e  NaN"%(e, shifts[i] )
+         print "Time for that cycle was:",time.time()-start
          
    def generalized_inverse(self,matrix):
        # marker to try out or not scaling the matrix
@@ -8127,7 +8128,7 @@ def getfcalc(peaks,s,cs=None):
    ms=miller.set(cs,mi)
    ma=miller.array(ms,data)
    fcm=xray.structure_factors.from_scatterers(crystal_symmetry=cs,d_min=0.1)
-   fc=fcm(s,ma,"direct").f_calc()
+   fc=fcm(xray_structure=s,miller_set=ma,algorithm="direct").f_calc()
    f=flex.to_list(fc.data())
    return Numeric.array(f)
 
@@ -8218,7 +8219,7 @@ we need to know how to generate the sum over symmetry related
 molecules. We can test this against a structure factor computation
 which uses the correct space group.
 
-The cctbx library contains a member function asymmetric_unit_in_p1 which
+The cctbx library contains a member function asymmetric\_unit\_in\_p1 which
 we can use to get the P1 structure.
 We then need to compute the structure factors for the symmetry related 
 molecules from the structure factors from the P1 structure. For simple
@@ -8234,72 +8235,223 @@ and can then add on the translation components will do all this, I hope.
 from cctbx import sgtbx
 from cctbx.array_family import flex
 from iotbx.pdb.xray_structure import from_pdb
+from iotbx.pdb.xray_structure import xray_structure_as_pdb_file
 
 import getsymops, cctbxfcalc
 import Numeric as n
 from LinearAlgebra import inverse
-from math import pi,sin,cos,pow
-
+from math import pi
+import time
 
 class translator:
    """ Compute structure factors for a structure plus a translation """
-   def __init__(self,pdbfile):
-      """ Pass a pdbfile to treat """
+   def __init__(self,pdbfile,hkls=None):
+      """ 
+      Pass a pdbfile for model of molecule and symmetry 
+      Optionally a set of hkls to treat (they can be set later via self.set_hkls)
+      ie - the molecule should already be in the right cell and spacegroup
+           but perhaps not positioned correctly
+      """
       self.structure   = from_pdb(pdbfile)
+      # Long time to work it out, but cctbx shifts atoms to special positions if you are
+      # not careful. Artificial intelligence ?-)
+      self.structure._min_distance_sym_equiv=0.000000000001
+      open("translatororigin.pdb","w").write(xray_structure_as_pdb_file(self.structure))
+      self.pdbfile=pdbfile
       self.p1structure = self.structure.asymmetric_unit_in_p1()
       self.symops = getsymops.getsymops(str(self.structure.space_group_info()))
+      if hkls!=None:
+         self.set_hkls(hkls)
 
    def set_hkls(self,hkls):
+      """
+      Set the list of hkls which you will want to calculate structure factors for
+      """
       self.hkls=n.array(hkls)
       # make fcalc arrays for hkls rotated by each symop and add on translation after
-      self.ztfcalc = n.zeros( (len(hkls),len(self.symops.keys()))   ,n.Complex)
-      self.truefcalc=cctbxfcalc.getfcalc(hkls,self.structure)
-      self.keys=self.symops.keys()
+      self.ztfcalc = n.zeros( (len(hkls), len(self.symops.keys()))   ,n.Complex)
+      self.keys=self.symops.keys() # preserve ordering of keys here
       for k in range(len(self.keys)):
-         m=inverse(n.transpose(self.symops[self.keys[k]][:3,:3]))
-         t=self.symops[self.keys[k]][3,:]
-         self.newhkls=n.transpose(n.matrixmultiply(m,n.transpose(self.hkls))).astype(n.Int)
-         self.ztfcalc[:,k] = cctbxfcalc.getfcalc(self.newhkls.tolist(),self.p1structure) # Molecular transform
+         t=self.symops[self.keys[k]][3,:]    # Translational part
+         m=self.symops[self.keys[k]][:3,:3]  # Rotational part
+         self.newhkls=n.matrixmultiply(self.hkls,m).astype(n.Int)
+         ts=time.time()
+         self.ztfcalc[:,k] = cctbxfcalc.getfcalc(self.newhkls.tolist(),self.p1structure) # Molecular transform 
          # Add phase factor
-         for i in range(self.hkls.shape[0]):
-            phi = 2*pi*n.dot(self.newhkls[i,:],-t)
-            self.ztfcalc[i,k] *= (cos(phi)+sin(phi)*1j)
-      # get fcalc for the sum of the two
-      for i in range(self.hkls.shape[0]):
-         fc=sum(self.ztfcalc[i,:])
-         f=self.truefcalc[i] 
-         assert (abs(fc-f) < 1e-6) , [self.hkls[i,:], fc, f, abs(fc-f), "Components",
-             self.ztfcalc[i,:] ]
-#         print  self.hkls[i,:], fc, f, abs(fc-f)
+         phi = 2*pi*n.dot(self.hkls,t)
+         self.ztfcalc[:,k] *= (n.cos(phi)+1j*n.sin(phi))
 
+      # get fcalc for the sum of the symops - only for debugging
+      if __debug__: 
+         self.truefcalc=cctbxfcalc.getfcalc(hkls,self.structure)
+         for i in range(self.hkls.shape[0]):
+            fc=sum(self.ztfcalc[i,:])
+            f=self.truefcalc[i] 
+            assert (abs(fc-f) < 1e-6) , [self.hkls[i,:], fc, f, abs(fc-f), "Components",
+               self.ztfcalc[i,:] ]
+
+   def compute_fsq(self,translation):
+      """
+      Compute f^2 for the model you gave plus a translation
+      Adding HRD to each component
+      """
+      self.f=n.zeros(self.ztfcalc.shape[0],n.Complex)
+      self.translation=n.array(translation)
+      for k in range(len(self.keys)):
+         m=self.symops[self.keys[k]][:3,:3]  # Rotation matrix
+         nt = n.matrixmultiply(m,translation)
+         hrd=2.*pi*n.dot(self.hkls,nt)
+         self.f += self.ztfcalc[:,k]*(n.cos(hrd)+1j*n.sin(hrd))
+      self.fsq=n.absolute(self.f) # abs of complex numbers
+      self.fsq=self.fsq*self.fsq  # ...squared
+      if __debug__: 
+         self.shiftedstructure=self.structure.apply_shift(translation)
+         # Check for special position problems
+         assert self.shiftedstructure.special_position_indices().size()==0 , ["Special positions",
+                                          self.shiftedstructure.special_position_indices().size()]
+         self.truefcalc=cctbxfcalc.getfcalc(self.hkls.tolist(),self.shiftedstructure)
+         for i in range(self.hkls.shape[0]):
+            fc=self.f[i]
+            f=self.truefcalc[i]
+            assert (abs(f-fc) < 1e-6),[self.hkls[i,:], "me",fc, "cctbx",f, abs(f-fc), "Shift",translation ]
 
 
 if __name__=="__main__":
-   import sys
+   import sys,time
    import translator
-   t=translator.translator(sys.argv[1])
-
+   t=[]
+   t.append(time.time())
    structure = from_pdb(sys.argv[1])
-
    fc = structure.structure_factors(d_min=float(sys.argv[2]),)
    hkls=flex.to_list(fc.miller_set().indices())
-#   import solventrefinedata
-#   d=solventrefinedata.solventrefinedata("test\myo\myo.dil","test\myo\myo.ccl")
-#   d.setrange([0,100])
-   t.set_hkls(hkls)
+   t.append(time.time())
+   print "Setting up hkls",t[-1]-t[-2]
+   translator_instance=translator.translator(sys.argv[1],hkls)
+   t.append(time.time())
+   print "Setting up translator",t[-1]-t[-2]
+   newhkl = translator_instance.compute_fsq( [0.,0.,0.5] )
+   t.append(time.time())
+   print "Time to compute structure factors",t[-1]-t[-2]
+   # Test this:
+   for shift in [ (0.1,0.,0.) , (0.,0.1,0.), (0.,0.,0.1), (0.2,0.4,0.6) ]:
+      translator_instance.compute_fsq(shift)
+      t.append(time.time())
+      print "Time to compute structure factors",t[-1]-t[-2]
+
 
 @}
 
-After some fiddling around it looks like the new miller indices
-for the peak after application of the reciprocal space symmetry
-operator combined with the negative translational part do the
-trick. FIXME You are going to justify that. Getting it to
-work for P63212 is not enough, it'll bugger up somewhere eventually.
+Some brief explanation of how that works. A structure factor is given by:
 
-Adding on a further translation then means a phase factor
-on the first component, and some other phase factor on
-the other components.
+\[ F(hkl) = \sum_{cell} f \exp[2\pi i (hx + ky +lz)] \]
+\[ F(hkl) = \sum_{symops} \sum_{molecule} f \exp[2\pi i (hx + ky +lz)] \]
+\[ F(hkl) = \sum_{symops} \sum_{molecule} f \exp[2\pi i \mb{H.X} ] \]
 
+When a symmetry operator is applied to a set of co-ordinates we
+get $\mb{X' = RX + T}$. So if we slip that into the structure
+factor equation we get $\mb{ H.X' = H.( RX + T)}$, which 
+is just the same as $\mb{ H.X' = (HR).X + HT}$. So we can
+flip to a new set of hkl's given by $\mb{H'=HR}$ and
+add on a phase factor $\mb{HT}$. 
+
+If we add on a translation to the co-ordinates of the molecule
+we get:
+
+\[ \mb{ HX' = H(R(X+D) + T) =  (HR)X + HRD + HT} \]
+
+So the phase factor to apply to the components of the structure
+factor is $\mb{HRD}$. 
+
+
+\subsection{Translation function mapping}
+
+Given the working translator object of the previous section
+we want to take a model, some data and move the model around the
+unit cell measuring the chi^2 as we go. The model
+needs to take solvent scattering into account. 
+
+Take the solvent scattering model and give it an internal translator
+object to make a translatedsolventmodel. Refine the solvent scattering
+at each point for some reasonable but small number of cycles and then
+record the chi^2 for each point. Then finally plot out the 
+chi^2 versus position.
+
+@o translatedsolventmodel.py
+@{
+""" Much like a solvent model, but allows the molecule to be translated"""
+
+import translator
+import solventmodel
+
+class translatedsolventmodel(solventmodel.solventmodel):
+   def __init__(self,pdbfile,**kwds):
+      self.pdbfile=pdbfile
+      self.variables=['scale','Asolv','Bsolv']
+      solventmodel.model.model.__init__(self,**kwds)
+      self.translator=translator.translator(pdbfile)
+      self.fsq=None
+
+   def set_hkls(self,hkls):
+      self.translator.set_hkls(hkls)
+
+   def set_translation(self,translation):
+      self.translator.compute_fsq(translation)
+      self.fsq = self.translator.fsq
+
+   def compute(self,data):
+      assert self.fsq!=None, "You must set the translation and hkls before computing"
+      solventmodel.solventmodel.compute(self,data)
+
+if __name__=="__main__":
+   # test - read the command line arguments and use the functions
+   import sys
+   import ciidata,solventrefinedata
+   import densemodelfit
+   import time
+   import Numeric
+   try:
+      ciifile = sys.argv[1]
+      cclfile = sys.argv[2]
+      pdbfile = sys.argv[3]
+      Asolv   = float(sys.argv[4])
+      Bsolv   = float(sys.argv[5])
+   except:
+      print "Usage: %s ciifile cclfile pdbfile A_solv B_solv "%(sys.argv[0])
+      print "Attempts to fit solvent scattering parameters"
+      sys.exit()
+
+   ciidataobj=solventrefinedata.solventrefinedata(ciifile,cclfile)
+   model = translatedsolventmodel(pdbfile,Asolv=Asolv,Bsolv=Bsolv,scale=1.0)
+   # estimate the scale factor:
+
+   model.set_hkls(ciidataobj.get_hkls())
+   model.set_translation([0.,0.,0.])
+   calc=sum(model.fsq)
+   obs= sum(ciidataobj.ciiobject.Ihkl)
+   s = obs/calc
+   model.set_value('scale',s)
+   ni=30
+   nj=15
+   start = time.time()
+   map=Numeric.zeros((ni,nj),Numeric.Float)
+   for i in range(ni):
+      for j in range(nj): 
+         model.set_value('Asolv',Asolv)
+         model.set_value('Bsolv',Bsolv)
+         model.set_value('scale',s)
+         t=[ float(i)/ni, 0, float(j)/nj]
+         model.set_translation( t )
+         optimiser = densemodelfit.densemodelfit(model=model,data=ciidataobj,marq=1.1)
+         optimiser.refine(ncycles=5,quiet=1)
+         print "%4d %4d %f %f %f %f"%(i,j,t[0],t[1],t[2],optimiser.chi2) 
+         map[i,j]=optimiser.chi2
+   end=time.time()
+   print "Total time=",end-start,"per point",(end-start)/(ni*nj)
+   from matplotlib import matlab
+   matlab.imshow(map)
+   matlab.show()
+
+@}
 
 \subsection{Orientational components}
 
