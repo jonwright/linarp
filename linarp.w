@@ -2344,6 +2344,17 @@ class ciidata:
       except KeyError:
         print "No unit cell supplied for your data"
       self.lh=None
+      # make array of sin(theta)/lambda squared.
+      rcm=self.rcm
+      dot=n.dot
+      mm =n.matrixmultiply
+      s=n.zeros(self.ciiobject.HKL.shape[0],n.Float)
+      for i in range ( self.ciiobject.HKL.shape[0] ):
+         hkl=self.ciiobject.HKL[i]
+         s[i] = dot(hkl,mm(rcm,hkl))
+      self.s=s
+
+
    def setrange(self,lh=None): 
       self.lh=lh
       if self.lh==None:
@@ -2364,9 +2375,8 @@ class ciidata:
    def sinthetaoverlambda2(self,i):
       hkl=self.ciiobject.HKL[i]
       return n.dot(hkl,n.matrixmultiply(self.d['rcm'],hkl))
-   def setfsq(self,fsq):
-      self.fsq=fsq # holds list of computed structure factors if available
-
+   def get_hkls(self):
+      return self.ciiobject.HKL.astype(n.Int).tolist()
 @}
   
 
@@ -2385,11 +2395,8 @@ from LinearAlgebra import inverse
 import cctbxfcalc  # For a set of fcalc numbers
 
 class solventrefinedata(ciidata.ciidata):
-   def __init__(self,dilsfile, cclfile, pdbfile):
+   def __init__(self,dilsfile, cclfile):
       ciiobj = cii.ciimatrix(dilsfile)
-      fcalc = cctbxfcalc.getfcalcfrompdb(pdbfile,ciiobj.HKL.astype(n.Int).tolist())
-      fsq=abs(fcalc).astype(n.Float32)
-      fsq=fsq*fsq*1e-6
       d={}
       c=open(cclfile,"r").readlines()
       for line in c:
@@ -2399,10 +2406,7 @@ class solventrefinedata(ciidata.ciidata):
                            [ a*b*cos(gamma*pi/180) , b*b, b*c*cos(alpha*pi/180) ] ,
                            [ a*c*cos(beta *pi/180) , b*c*cos(alpha*pi/180) , c*c] ] )
       d['rcm']= inverse(d['rm'])
-      ciidata.ciidata.__init__(self,ciiobj ,d)
-      self.setfsq(fsq)
-
-      
+      ciidata.ciidata.__init__(self,ciiobj ,d)      
 @}
 
 
@@ -8205,6 +8209,28 @@ of the structure factors with respect to the position of the molecule.
 So we should be ready to put something together for rigid body optimisation
 with respect to position of the molecule now.
 
+\subsection{Translation Searches}
+
+Assuming we read a model in which has some particular space group,
+we need to get the list of symmetry operators for that space group
+and also compute the structure factors in space group P1. Then
+we need to know how to generate the sum over symmetry related
+molecules. We can test this against a structure factor computation
+which uses the correct space group.
+
+The cctbx library contains a member function asymmetric_unit_in_p1 which
+we can use to get the P1 structure.
+We then need to compute the structure factors for the symmetry related 
+molecules from the structure factors from the P1 structure. For simple
+rotations we know that the hkl's can just be transformed. For rotations
+and translations combined the situation is more difficult. We could make 
+a structure for each of the symmetry operators?
+
+The symop applied to hkl gives h'k'l' for the rotation. Then add on the translation
+as normal.
+
+
+
 \subsection{Orientational components}
 
 Assuming we have put the molecule into spacegroup P1 and computed
@@ -8281,11 +8307,17 @@ It will try to refine the overall scale and two solvent scattering parameters.
 @< pycopyright @>
 import Numeric as n
 import model
-from math import exp
+import cctbxfcalc
 class solventmodel(model.model):
-   def __init__(self,**kwds):
+   def __init__(self,pdbfile,**kwds):
       self.variables=['scale','Asolv','Bsolv']
       model.model.__init__(self,**kwds)
+
+   def set_hkls(self,hkls):  
+      fcalc = cctbxfcalc.getfcalcfrompdb(pdbfile,hkls)
+      fsq=abs(fcalc).astype(n.Float32)
+      self.fsq=fsq*fsq*1e-6
+
    def compute(self,data):
       # peak here needs to specify h,k,l,fcalc
       self.ycalc=n.zeros(data.npoints,n.Float32)
@@ -8293,15 +8325,23 @@ class solventmodel(model.model):
       scale=self.vv[self.vd['scale']]
       A =   self.vv[self.vd['Asolv']]
       B =   self.vv[self.vd['Bsolv']]
-      for i in range(data.npoints):
-         s = data.sinthetaoverlambda2(i)   # peaks must provide their d-spacings and icalc
-         fsq=data.fsq[i]
-         self.ycalc[i]=scale * fsq * ( 1.0 - 2.* A * exp(-B * s ) + 
-                                             A * A * exp(-2.* B * s ) ) 
-         self.gradients[i,0]= self.ycalc[i]/scale  # Scale factor
-         self.gradients[i,1]= 2 * scale * fsq * (A*exp(-2*B*s)-exp(-B*s))
-         self.gradients[i,2]= 2 * scale * s * A * fsq * (exp(-B*s)-A*exp(-2*B*s))
+      ebs=n.exp(-B*data.s).astype(n.Float32)  # data supplies sin(theta)/lambda in s
+      e2bs=ebs*ebs
+      self.ycalc = scale * self.fsq *(1.0 - 2.0*A*ebs + A*A*e2bs )
+      self.gradients[:,0]=(self.ycalc/scale).astype(n.Float32)
+      self.gradients[:,1]=(2 * scale * self.fsq * (A*e2bs-ebs)).astype(n.Float32)
+      self.gradients[:,2]=(2 * scale * data.s * A * self.fsq * (ebs-A*e2bs)).astype(n.Float32)
+# Used Numeric for a factor 10 speedup
+#      for i in range(data.npoints):
+#         s = data.sinthetaoverlambda2(i)   # peaks must provide their d-spacings and icalc
+#         fsq=self.fsq[i]
+#         self.ycalc[i]=scale * fsq * ( 1.0 - 2.* A * exp(-B * s ) + 
+#                                             A * A * exp(-2.* B * s ) ) 
+#         self.gradients[i,0]= self.ycalc[i]/scale  # Scale factor
+#         self.gradients[i,1]= 2 * scale * fsq * (A*exp(-2*B*s)-exp(-B*s))
+#         self.gradients[i,2]= 2 * scale * s * A * fsq * (exp(-B*s)-A*exp(-2*B*s))
 #         print data.ciiobject.HKL[i],s,self.ycalc[i],self.gradients[i,:]
+
    def gradient(self, variable):
       if variable=='scale':
          return self.gradients[:,0]
@@ -8313,7 +8353,7 @@ class solventmodel(model.model):
 if __name__=="__main__":
    # test - read the command line arguments and use the functions
    import sys
-   import solventrefinedata
+   import ciidata,solventrefinedata
    import densemodelfit
    try:
       ciifile = sys.argv[1]
@@ -8327,19 +8367,21 @@ if __name__=="__main__":
       print "Attempts to fit solvent scattering parameters"
       sys.exit()
 
-   ciidataobj=solventrefinedata.solventrefinedata(ciifile,cclfile,pdbfile)
+   ciidataobj=solventrefinedata.solventrefinedata(ciifile,cclfile)
+   model = solventmodel(pdbfile,Asolv=Asolv,Bsolv=Bsolv,scale=1.0)
    # estimate the scale factor:
-   calc=sum(ciidataobj.fsq)
+
+   model.set_hkls(ciidataobj.get_hkls())
+   calc=sum(model.fsq)
    obs= sum(ciidataobj.ciiobject.Ihkl)
    s = obs/calc
-   model = solventmodel(Asolv=Asolv,Bsolv=Bsolv,scale=s)
+   model.set_value('scale',s)
 
-
-   optimiser = densemodelfit.densemodelfit(model=model,data=ciidataobj,marq=2.0)
+   optimiser = densemodelfit.densemodelfit(model=model,data=ciidataobj,marq=1.1)
    
-   optimiser.refine()
+   optimiser.refine(ncycles=10)
    while raw_input("More cycles?") not in ["Q","q","n","N","0",""]:
-      optimiser.refine()
+      optimiser.refine(ncycles=10)
 @}
 
 
@@ -8387,6 +8429,90 @@ These include, but should not be limited to:
 Read up on what is available in cctbx for carrying all of this out.
 I think Ralf Grosse-Kunstleve has implemented most of the things
 you can dream of doing with symmetry already?
+
+\section{Space group symbol interpretation and conversion to operators}
+
+Via cctbx (and sgtbx) there is a vast variety of things to do with symmetry.
+First thing for me (today) is to get a list of symmetry operators.
+Fortunately this is straightforward:
+
+@o getsymops.py
+@{
+from cctbx import sgtbx
+from Numeric import reshape
+def getsymops(symbol):
+   """ Returns a dictionary of symmetry operators for a given space group symbol """
+   s={}
+   for op in sgtbx.space_group_info(symbol).group().all_ops():
+      s[str(op)]=reshape(op.as_double_array(),(4,3))
+   return s
+
+if __name__=="__main__":
+   import sys
+   s = getsymops(sys.argv[1])
+   for k in s.keys():
+      print k
+      print s[k]
+      print
+@}
+
+\section{Converting structure factors using symmetry operators}
+
+Given a molecular object which has given some (complex) value for $F(hkl)$
+we wish to know the value of $F(hkl)$ for the same object transformed 
+by a symmetry operator.
+
+The rotational part of the structure factor applied to (h,k,l) gives (h',k',l')
+followed by addition of the translational part which gives a phase factor.
+Do we use the primed or unprimed indices in getting the phase factor?? It should
+be the same way that we get the primed or unprimed co-ordinates, so that I think
+it goes with the primed hkls.
+
+Thus given a reflection structure factor $F(hkl)$ we want the structure factor 
+corresponding to the molecule transformed by symmetry.
+
+@o ftrans.py
+@{
+from cctbx import sgtbx
+from cctbx.array_family import flex
+from iotbx.pdb.xray_structure import from_pdb
+
+import getsymops
+import Numeric as n
+from math import pi
+class ftrans:
+   """ Transforms hkls according to space group """
+   def __init__(self,symbol):
+      """ Pass a space group symbol string """
+      self.s = getsymops.getsymops(symbol)
+   def ftrans(h,f):
+      t={}
+      for k in self.s.keys():
+         m=s[k]
+         # convert hkl,                        Phase factor
+         t[k]=[n.matrixmultiply(m[:3,:3],h)],2.*pi*n.dot(h,m[3,:])
+      return t
+
+if __name__=="__main__":
+   import sys
+   structure =from_pdb(sys.argv[1])
+   object    =ftrans(str(structure.space_group_info()))
+   pone      =structure.asymmetric_unit_in_p1()
+   structuref=structure.structure_factors(d_min=20.)
+   sfc       =structuref.f_calc()
+   sfcd      =flex.to_list(sfc.data())
+   hkl       =flex.to_list(sfc.indices())
+   for i in range(len(sfcd)):
+      print hkl[i],sfcd[i]
+   print
+   structuref=pone.structure_factors(d_min=20.)
+   sfc       =structuref.f_calc()
+   sfcd      =flex.to_list(sfc.data())
+   hkl       =flex.to_list(sfc.indices())
+   for i in range(len(sfcd)):
+      print hkl[i],sfcd[i]
+
+@}
 
 \chapter{Restraints}
 
@@ -8734,8 +8860,9 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
 import Tkinter as Tk
-import tkFileDialog
+import tkFileDialog, tkMessageBox
 import sys,os,time
+
 
 class twodplot(Tk.Frame):
    def __init__(self,parent=None,data=None):
@@ -8757,15 +8884,77 @@ class twodplot(Tk.Frame):
       self.tkc.bind("<Button1-Motion>",self.on_move)
       self.tkc.bind("<ButtonPress-2>",self.on_2)
       self.tkc.bind("<ButtonPress-3>",self.on_3)
+      self.bindkeys()
       self.rubberbandbox=None
       self.bf=Tk.Frame(self)
+      Tk.Button(master=self.bf, text='Save Plot', command=self.printplot).pack(side=Tk.LEFT)
       Tk.Button(master=self.bf, text='LogY', command=self.logy).pack(side=Tk.LEFT)
       Tk.Button(master=self.bf, text='LogX', command=self.logx).pack(side=Tk.LEFT)
+# FIXME - buttons for panx/y and zoomx/y
+      Tk.Button(master=self.bf,text='<Left>' ,
+                  command=lambda : self.keypress(self.a.panx,1 )  ).pack(side=Tk.LEFT)
+      Tk.Button(master=self.bf,text='<Right>',
+                  command=lambda : self.keypress(self.a.panx,-1)  ).pack(side=Tk.LEFT)
+      Tk.Button(master=self.bf,text='<Up>'   ,
+                  command=lambda : self.keypress(self.a.pany,-1 ) ).pack(side=Tk.LEFT)
+      Tk.Button(master=self.bf,text='<Down>' ,
+                  command=lambda : self.keypress(self.a.pany,1)   ).pack(side=Tk.LEFT)
+      Tk.Button(master=self.bf,text='<UnZoomX>' , 
+                  command=lambda : self.keypress(self.a.zoomx,-1 )  ).pack(side=Tk.LEFT)
+      Tk.Button(master=self.bf,text='<ZoomX>',
+                  command=lambda : self.keypress(self.a.zoomx,1)  ).pack(side=Tk.LEFT)
+      Tk.Button(master=self.bf,text='<ZoomY>'   ,
+                  command=lambda : self.keypress(self.a.zoomy,1 ) ).pack(side=Tk.LEFT)
+      Tk.Button(master=self.bf,text='<UnZoomY>' ,
+                  command=lambda : self.keypress(self.a.zoomy,-1)   ).pack(side=Tk.LEFT)
+      Tk.Button(master=self.bf,text='<AutoScale>' , 
+                  command=lambda  : self.keypress(self.autoscale)   ).pack(side=Tk.LEFT)
+      Tk.Button(master=self.bf,text='<AutoScaleY>', 
+                  command=lambda  : self.keypress(self.autoscaley, e )  ).pack(side=Tk.LEFT)
       self.bf.pack(side=Tk.BOTTOM)
       self.label=Tk.Label(self,text="Plot window messages")
       self.label.pack(side=Tk.BOTTOM,fill=Tk.X, expand=0)
       self.pack(side=Tk.TOP,fill=Tk.BOTH,expand=1)
       self.replot()
+
+   def printplot(self):
+      fn = tkFileDialog.asksaveasfilename(title="Filename to print to",
+            defaultextension="png")
+      print fn 
+      f,e = os.path.splitext(fn)
+      extns=['png','ps','eps','bmp','raw','rgb']
+      print e
+      if e.lower() in ['.png','.ps','.eps','.bmp','.raw','.rgb']:
+         self.update_idletasks() # Try to get screen redrawn
+         self.canvas.print_figure(fn, dpi=300, orientation='landscape')
+      else:
+         tkMessageBox.showinfo("Sorry","I can only make output in these formats"+str(extns))
+
+   def keypress(self,*arg): 
+      if len(arg)>1:
+         arg[0](*arg[1:])
+      else:
+         arg[0]()
+      self.canvas.show()
+
+
+   def bindkeys(self):
+      self.bind_all('<Left>' ,lambda e: self.keypress(self.a.panx,1 )  )
+      self.bind_all('<Right>',lambda e: self.keypress(self.a.panx,-1)  )
+      self.bind_all('<Up>'   ,lambda e: self.keypress(self.a.pany,-1 ) )
+      self.bind_all('<Down>' ,lambda e: self.keypress(self.a.pany,1)   )
+      self.bind_all('<Shift-Left>' ,lambda e: self.keypress(self.a.zoomx,-1 )  )
+      self.bind_all('<Shift-Right>',lambda e: self.keypress(self.a.zoomx,1)  )
+      self.bind_all('<Shift-Up>'   ,lambda e: self.keypress(self.a.zoomy,1 ) )
+      self.bind_all('<Shift-Down>' ,lambda e: self.keypress(self.a.zoomy,-1)   )
+      self.bind_all('<Next>' , lambda e : self.keypress(self.autoscale)   )
+      self.bind_all('<Prior>', lambda e : self.keypress(self.autoscaley, e )  )
+
+   def autoscaley(self,e):
+      print dir(self.a.dataLim)
+      print self.a.dataLim 
+      yr=self.a.get_ylim()
+      self.a.set_ylim(yr)
 
    def replot(self):
       self.a.clear()
@@ -9005,7 +9194,7 @@ if __name__=="__main__":
       from tkMessageBox import showinfo
       showinfo("Help","Sorry, no help for you!\nPlease try harder")
    linarpcredits = open("linarp.credits","r").read() 
-   license = open("linarp.licences","r").read()
+   license = open("LICENSE","r").read()
 
    def credits():
       from tkMessageBox import showinfo
@@ -9020,6 +9209,7 @@ if __name__=="__main__":
                               [ ( "Open epf file", 5, self.openxye),
                                 ( "Open mca file", 5, self.openmca),
                                 ( "Open dils file", 5, self.opensrd),
+                                ( "Print plot", 0, self.printplot ),
                                 ( "Clear", 0, self.clear ),
                                 ( "Exit", 1, sys.exit) ] ) ,
                            ( "Plotting", 0, 
@@ -9033,21 +9223,23 @@ if __name__=="__main__":
       def clear(self):
          self.plotitems=[]
          self.updateplot()
+ 
+      def printplot(self): self.twodplotter.printplot()
 
       def openxye(self):
-         fn=tkFileDialog.askopenfilename(initialdir=os.getcwd(), title="Name of EPF file please") 
+         fn = self.opener.show( title="Name of EPF file please") 
          self.plotitems.append(guiimports.epffile(fn))
          self.updateplot()
 
       def openmca(self):
-         fn=tkFileDialog.askopenfilename(initialdir=os.getcwd(), title="Name of MCA file please")
+         fn = self.opener.show( title="Name of MCA file please")
          self.plotitems.append(guiimports.mcadata(fn))
          self.updateplot()
 
       def opensrd(self):
-         d=tkFileDialog.askopenfilename(initialdir=os.getcwd(), title="Name of DILS file please")
-         c=tkFileDialog.askopenfilename(initialdir=os.getcwd(), title="Name of CCL file please")
-         p=tkFileDialog.askopenfilename(initialdir=os.getcwd(), title="Name of PDB file please")
+         d = self.opener.show( title="Name of DILS file please")
+         c = self.opener.show( title="Name of CCL file please")
+         p = self.opener.show( title="Name of PDB file please")
          self.plotitems.append(guiimports.solventrefinedata(d,c,p))
          self.updateplot()
 
@@ -9094,6 +9286,7 @@ if __name__=="__main__":
       def makeWidgets(self):
          import maketree, inspect, Pmw
          # Get size of TopLevels window
+         self.opener=tkFileDialog.Open()
          self.pw=Pmw.PanedWidget(self,orient='horizontal',
                                hull_borderwidth = 1,
                                hull_relief = 'sunken',
@@ -9103,15 +9296,16 @@ if __name__=="__main__":
          f=maketree.ScrolledCanvas(treepane)
          f.canvas.config(bg='white')
          f.frame.pack(side=LEFT,expand=1,fill=BOTH)
-         l=[("Linarp",()), inspect.getclasstree( 
-               [ i[1]  for  i  in 
-                inspect.getmembers(guiimports, inspect.isclass ) ] ) ]
          # Sorry, taking the piss a bit there, what I mean is:
          #    l = [ i[1]  for  i  in  inspect.getmembers(guiimports, inspect.isclass ) ]
          #    l=inspect.getclasstree(l)
          #    l=[ ("linarp",()) ,l]
-         item = maketree.linarptreeitem(l)
-         node=maketree.TreeNode(f.canvas, None, item)
+         #    item = maketree.linarptreeitem(l)
+         #
+         node=maketree.TreeNode(f.canvas, None,         
+              maketree.linarptreeitem([("Linarp",()), inspect.getclasstree( 
+              [ i[1]  for  i  in  inspect.getmembers(guiimports, inspect.isclass ) ] ) ] ) )
+         # Who said python is clearer the perl?
          node.update()
          node.expand()
          plotpane=self.pw.add("Plot",min=0.1,max=0.9,size=0.75)
@@ -9173,9 +9367,30 @@ in there into gui functionality. The python "inspect" module will help to do tha
 @{
 
 import inspect, guiimports
-from idlelib.TreeWidget import TreeItem, TreeNode, ScrolledCanvas
+from idlelib.TreeWidget import TreeItem, TreeNode
 from types import ModuleType, ClassType, ListType
-from Tkinter import Frame
+from Tkinter import Frame, Canvas, Scrollbar
+
+
+class ScrolledCanvas:
+    def __init__(self, master, **opts):
+        if not opts.has_key('yscrollincrement'):
+            opts['yscrollincrement'] = 17
+        self.master = master
+        self.frame = Frame(master)
+        self.frame.rowconfigure(0, weight=1)
+        self.frame.columnconfigure(0, weight=1)
+        self.canvas = Canvas(self.frame, **opts)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.vbar = Scrollbar(self.frame, name="vbar")
+        self.vbar.grid(row=0, column=1, sticky="nse")
+        self.hbar = Scrollbar(self.frame, name="hbar", orient="horizontal")
+        self.hbar.grid(row=1, column=0, sticky="ews")
+        self.canvas['yscrollcommand'] = self.vbar.set
+        self.vbar['command'] = self.canvas.yview
+        self.canvas['xscrollcommand'] = self.hbar.set
+        self.hbar['command'] = self.canvas.xview
+
 
 class linarptreeitem(TreeItem):
    def __init__(self,l,kids=None):
@@ -9305,7 +9520,7 @@ interact with an object \emph{which did not exist at
 the time the gui was written}. 
 The limitation here is that the writer of the class
 must include a string \code{arglist=args} in the 
-docstring for the \code{__init__} method for the 
+docstring for the \code{\_\_init\_\_} method for the 
 class.
 The user can the be prompted for whatever is needed in creation. 
 Types of things become important now, and as python
@@ -9324,63 +9539,86 @@ So we have a list of things which can be created -
 from our tree extravaganza. So we have a create
 new function which takes a class as argument.
 It prompts the users for default values for each
-of the arguments and then applies the class.__init__
+of the arguments and then applies the class.\_\_init\_\_
 method with the received arguments. Or by 
 not putting them in if we don't know what they are.
 
 @o objectcreator.py
 @{
 """ 
-Create new linarp objects based on the docstrings of
-the classes __init__ method.
-That means your __init__ MUST contain the right information
+Create new linarp objects based on the argument lists
+of init functions and also their docstrings
+That means your __init__ MUST give the right hints
 """
 
-import inspect 
+import inspect , sys
 
-def objectcreator(klass):
+class objectcreator(klass):
+ def __init__(self,*args,**keywords):
    print "Instantiating a",str(klass),"object. The instructions read:"
-   args=[]
-   print inspect.getargspec(klass.__init__)
-   for line in klass.__init__.__doc__.split("\n"):
-      print line
-      if line.find("arglist") >= 0:
-         args.extend(line.split("=")[1].split(","))
-   # Now we have a list of the arguments
-   print args
-   argdict={}
-   for arg in args:
-      value = raw_input("Please enter value for "+arg)
-      if value != "":
-         argdict[arg]=value
-   extra=raw_input("Send something unexpected called:")
-   while extra != "":
-      value=raw_input("Which has value")
-      argdict[extra]=value
-      extra=raw_input("Send something unexpected called:")
-   print argdict
-   return klass(argdict)
-      
-if __name__=="__main__":
-   class bob:
-      def __init__(self,jerry, laura, bob=1,*k,**key):
-         """
-         A linarp docstring
-         It must contain a line specifying the arguments
-         arglist = jerry, tim, laura, row, fun, inputfile, outputfile, splendiferous
-         and ideally some instructions about how to use them
-         """
-         self.kwds=key
-         print "First bit",k
-         print "Second bit",key
-      def printem(self):
-          for k in self.kwds.keys():
-             print k,"=>",self.kwds[k]
-   jack = objectcreator(bob)
-   print jack
-   jack.printem()
-@}
+   sys.stdout.writelines( str(klass.__init__.__doc__ )+"\n")
+   arglist, os, ts , defaults = inspect.getargspec(klass.__init__)
+   print "Inspect:",inspect.getargspec(klass.__init__)
+   arglist.pop(0)  # throw out self
+   args=[]         # list to make tuple and pass
+   keywordargs={}  # dictionary of name value pairs
+   if defaults != None:
+      l=list(defaults)
+      while len(l)>0:
+         keywordargs[arglist.pop()] = l.pop()
+   for arg in arglist:
+      args.append(None)
+   args=tuple(args)
+   print "Passing args",args
+   print "And keywords",keywordargs
+   return klass(*tuple(args),**keywordargs)
 
+class tkobjectcreator(Frame):
+   def __init__(self, klass):
+      arglist, os, ts, defaults =inspect.getargspec(klass.__init__)
+      arglist.pop(0)
+      args=[]         # list to make tuple and pass
+      keywordargs={}  # dictionary of name value pairs
+      if defaults != None:
+         l=list(defaults)
+         while len(l)>0:
+            keywordargs[arglist.pop()] = l.pop()
+      for arg in arglist:
+         if arg.find("file")>=0:
+            # need a file button
+         
+         args.append(None)
+       
+
+
+def curry(*args,**kwds):
+   """ Python Cookbook 15.7 """
+   def callit(*moreargs, **morekwds):
+      kw = kwds.copy()
+      kw.update(morekwds)
+      return args[0](*(args[1:]+moreargs),**kw)
+   return callit
+   
+
+if __name__=="__main__":
+   class bar:
+      def __init__(self, arg1 , arg2, arg3=3, arg4=4, **key):
+         print "arg1",arg1
+         print "arg2",arg2
+         print "arg3",arg3
+         print "arg4",arg4
+         print "Two stars **",key
+   class foo:
+      def __init__(self,**key):
+         print "In foo init **key",key
+   class baz:
+      def __init__(self,*k,**key):
+         pass
+   bar(1,2,3,4,a=8)
+   print objectcreator(bar)
+   print objectcreator(foo)
+   print objectcreator(baz)
+@}
 
 \section{Scripting}
 
