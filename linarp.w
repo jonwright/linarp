@@ -1408,6 +1408,50 @@ if __name__=="__main__":
 
 @}
 
+\section{Reading chi files (from fit2d)}
+
+Read in the ``chiplot'' format which fit2d produces.
+Format seems to be:
+
+\begin{itemize}
+\item Comment line or title
+\item X-units. eg ``2-Theta Angle (Degrees)''
+\item Y-units. eg ``Intensity''
+\item Number of datapoints
+\item Followed by pairs of x,y points
+\end{itemize}
+
+@o chidata.py
+@{
+""" Chiplot file reader """
+@< pycopyright @>
+from powderdata import powderdata
+import Numeric as n
+class chidata(powderdata):
+   def __init__(self,filename,**kwargs):
+       xy=[] ; e=[] ; d={}
+       d['fromfile']=filename 
+       on=0
+       f=open(filename,"r")
+       d['title']=f.readline()
+       d['xunits']=f.readline()
+       d['yunits']=f.readline()
+       d['npoints']=f.readline()
+       for line in f.readlines():
+          xy.append(map(float,line.split()))
+       xy=n.array(xy)
+       x=xy[:,0]
+       y=xy[:,1]
+       e=n.sqrt(y+0.5) # Bayesian 0.5 to avoid zero errorbars
+       powderdata.__init__(self,x,y,e,d)
+
+ 
+if __name__=="__main__":
+   import sys
+   obj=chidata(sys.argv[1])
+@}
+
+
 \section{Reading cif (data) files}
 
 Read in the powder data related parts of cif files.
@@ -9459,6 +9503,7 @@ if __name__=="__main__":
       def start(self):
           self.menuBar = [ ( "File", 0,
                               [ ( "Open epf file", 5, self.openxye),
+                                ( "Open chi file", 5, self.openchi),
                                 ( "Open mca file", 5, self.openmca),
                                 ( "Open dils file", 5, self.opensrd),
                                 ( "Print plot", 0, self.printplot ),
@@ -9487,6 +9532,12 @@ if __name__=="__main__":
          fn = self.opener.show( title="Name of MCA file please")
          self.plotitems.append(guiimports.mcadata(fn))
          self.updateplot()
+
+      def openchi(self):
+         fn = self.opener.show( title="Name of chi file please")
+         self.plotitems.append(guiimports.chidata(fn))
+         self.updateplot()
+
 
       def opensrd(self):
          d = self.opener.show( title="Name of DILS file please")
@@ -9590,6 +9641,7 @@ from powderdata import powderdata
 from epffile import epffile
 from mcadata import mcadata
 from powbase import powbase
+from chidata import chidata
 
 # Possible Intensity Objects
 #import shelx
