@@ -8367,14 +8367,14 @@ factor is $\mb{HRD}$.
 
 Given the working translator object of the previous section
 we want to take a model, some data and move the model around the
-unit cell measuring the chi^2 as we go. The model
+unit cell measuring the chi\^2 as we go. The model
 needs to take solvent scattering into account. 
 
 Take the solvent scattering model and give it an internal translator
 object to make a translatedsolventmodel. Refine the solvent scattering
 at each point for some reasonable but small number of cycles and then
-record the chi^2 for each point. Then finally plot out the 
-chi^2 versus position.
+record the chi\^2 for each point. Then finally plot out the 
+chi\^2 versus position.
 
 @o translatedsolventmodel.py
 @{
@@ -8415,23 +8415,25 @@ if __name__=="__main__":
       pdbfile = sys.argv[3]
       Asolv   = float(sys.argv[4])
       Bsolv   = float(sys.argv[5])
+
    except:
       print "Usage: %s ciifile cclfile pdbfile A_solv B_solv "%(sys.argv[0])
       print "Attempts to fit solvent scattering parameters"
       sys.exit()
 
    ciidataobj=solventrefinedata.solventrefinedata(ciifile,cclfile)
+   ciidataobj.setrange([0,lastpoint])
    model = translatedsolventmodel(pdbfile,Asolv=Asolv,Bsolv=Bsolv,scale=1.0)
    # estimate the scale factor:
-
+ 
    model.set_hkls(ciidataobj.get_hkls())
    model.set_translation([0.,0.,0.])
    calc=sum(model.fsq)
    obs= sum(ciidataobj.ciiobject.Ihkl)
    s = obs/calc
    model.set_value('scale',s)
-   ni=30
-   nj=15
+   ni=63 # 1A steps for myoglobin
+   nj=35
    start = time.time()
    map=Numeric.zeros((ni,nj),Numeric.Float)
    for i in range(ni):
@@ -8442,7 +8444,7 @@ if __name__=="__main__":
          t=[ float(i)/ni, 0, float(j)/nj]
          model.set_translation( t )
          optimiser = densemodelfit.densemodelfit(model=model,data=ciidataobj,marq=1.1)
-         optimiser.refine(ncycles=5,quiet=1)
+         optimiser.refine(ncycles=3,quiet=1)
          print "%4d %4d %f %f %f %f"%(i,j,t[0],t[1],t[2],optimiser.chi2) 
          map[i,j]=optimiser.chi2
    end=time.time()
