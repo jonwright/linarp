@@ -2310,6 +2310,9 @@ class ciimatrix:
 #      print sum, sum/self.nt, math.sqrt(sum/self.nt)
       return sum
     
+
+@< sxdata @>
+
 def normalise(matrix):
       """
       Does not really belong in this object.
@@ -2356,6 +2359,59 @@ if __name__=="__main__":
    print aomc[:10]
    sys.exit()
 @}
+
+
+
+When there are no correlations, we still need to be able to treat the
+data. Make a hkl,i,sigma(i) type dataset as well.
+
+@d sxdata
+@{
+class sxdata(ciimatrix):
+   def __init__(self,filename):
+      """
+      Single crystal data wedged into a cii box
+      """
+      lines=open(filename,"r").readlines()
+      self.ni=len(lines)
+      self.nv=0
+      self.nt=self.ni
+      self.Ihkl=Numeric.zeros(self.ni,Numeric.Float32)
+      self.HKL=Numeric.zeros((self.ni,3),Numeric.Float32)
+      self.IP=Numeric.zeros(self.ni,Numeric.Int)  # pointers start at 1
+      self.matrix=Numeric.zeros(self.ni,Numeric.Float32)
+      for i in range(len(lines)):
+        try:
+         items=lines[i].split() 
+         self.HKL[i]=[int(items[0]),int(items[1]),int(items[2])]
+         self.IP[i]=i+1
+         self.Ihkl[i]=float(items[3])
+         if float(items[3])>0.:
+            e=float(items[4])
+            try: 
+              w=1./e/e
+            except:
+              w=0.
+         else: 
+            w=0.
+         self.matrix[i]=w
+        except ValueError:
+           print items
+           print "Sorry - problems interpreting your file"
+           sys.exit()
+      self.rhs=Numeric.zeros(self.nt,Numeric.Float32)
+      self.rhs[0:self.ni]=self.Ihkl
+      print "Number of entries in matrix",self.IP[-1]
+      print "Number of intensities=",self.ni,"Total vars",self.nt
+      print "Percentage full=",self.IP[-1]*100.0/self.ni/self.ni
+      self.ciimat=None
+      self.L=None
+      self.vecy=Numeric.zeros(self.nt,Numeric.Float32)
+@}
+
+
+
+
 
 \subsection{An optimisation object for correlated integrated intensities}
 
@@ -2422,7 +2478,10 @@ class ciidata:
    def get_hkls(self):
       return self.ciiobject.HKL[:self.npoints].astype(n.Int).tolist()
 @}
-  
+ 
+
+
+ 
 
 Now for something useful - we want to refine solvent scattering (later on)
 and need to read a dils file from prodd, a ccl file to get the cell parameters
@@ -2440,7 +2499,11 @@ import cctbxfcalc  # For a set of fcalc numbers
 
 class solventrefinedata(ciidata.ciidata):
    def __init__(self,dilsfile, cclfile):
-      ciiobj = cii.ciimatrix(dilsfile)
+      ciiobj=None
+      if dilsfile[-4:] == ".dil":
+         ciiobj = cii.ciimatrix(dilsfile)
+      if dilsfile[-4:] == ".hkl":
+         ciiobj = cii.sxdata(dilsfile)
       d={}
       c=open(cclfile,"r").readlines()
       for line in c:
@@ -8186,7 +8249,46 @@ def getfcalcfrompdb(pdbfile,peaks=None):
 
 @}
 
+\subsection{Structure factor gradients}
 
+@o cctbx_getderivs.py
+@{
+from cctbx import xray, crystal, miller, eltbx
+from cctbx.array_family import flex
+from cctbx.xray import ext
+
+def getderiv(peak,cs,s):
+   mi=flex.miller_index(peak)
+   data=flex.double((0,)*mi.size())
+   ms=miller.set(cs,mi)
+   ma=miller.array(ms,data)
+   fcm=xray.structure_factors.from_scatterers(crystal_symmetry=cs,d_min=0.1)
+   fc=fcm(s,ma,"direct").f_calc()
+   # What we want to get derivatives of
+   gf=xray.structure_factors.gradient_flags(site=1)#,u_iso=1,u_aniso=1,occupancy=1)   
+   # Derivative   s of a target w.r.t Fc 
+   # ... first get a one element double_complex array (must be better ways)
+   d=flex.complex_double(((1.0+0.j),))
+   derivs=[]
+   for i in xrange(ma.size()):  # range should be 1
+      r=ext.structure_factors_gradients_direct(  # skip the complications
+        s.unit_cell(),       # args to C++ code -cell
+        s.space_group(),     #                  -sg
+        fc.indices()[i:i+1], #                  -hkl list
+        s.scatterers(),      #                  -atoms
+        s.scattering_dict(), #                  -form factors
+        d,                   # Multipliers?
+        gf,                  #                  -flags for which derivs       
+        0 #s.n_parameters(gf)# number of parameters - for "packing"
+        )
+#      f=fc.data()[i]
+#      dbx = flex.to_list(r.d_target_d_site_frac())[1][0]
+#      dlau  = flex.to_list(r.d_target_d_u_iso())[0]
+#      dbu11 = flex.to_list(r.d_target_d_u_star())[1][0] 
+#      dbu22 = flex.to_list(r.d_target_d_u_star())[1][1]*2. # sum over 22,33
+#      dbs   = flex.to_list(r.d_target_d_occupancy())[1]
+   return fc,r
+@}
 
 
 \section{Rigid molecular objects}
@@ -8466,7 +8568,7 @@ if __name__=="__main__":
       sys.exit()
 
    ciidataobj=solventrefinedata.solventrefinedata(ciifile,cclfile)
-   ciidataobj.setrange([0,lastpoint])
+#   ciidataobj.setrange([0,lastpoint])
    model = translatedsolventmodel(pdbfile,Asolv=Asolv,Bsolv=Bsolv,scale=1.0)
    # estimate the scale factor:
  
@@ -8476,19 +8578,20 @@ if __name__=="__main__":
    obs= sum(ciidataobj.ciiobject.Ihkl)
    s = obs/calc
    model.set_value('scale',s)
-   ni=63 # 1A steps for myoglobin
-   nj=35
+   ni=6 # 1A steps for myoglobin
+   nj=6
    start = time.time()
    map=Numeric.zeros((ni,nj),Numeric.Float)
    for i in range(ni):
       for j in range(nj): 
          model.set_value('Asolv',Asolv)
          model.set_value('Bsolv',Bsolv)
-         model.set_value('scale',s)
          t=[ float(i)/ni, 0, float(j)/nj]
          model.set_translation( t )
-         optimiser = densemodelfit.densemodelfit(model=model,data=ciidataobj,marq=1.1)
-         optimiser.refine(ncycles=3,quiet=1)
+         s = Numeric.sum(model.fsq * ciidataobj.ciiobject.Ihkl)/Numeric.sum(ciidataobj.ciiobject.Ihkl*ciidataobj.ciiobject.Ihkl)
+         model.set_value('scale',1./s)
+         optimiser = densemodelfit.densemodelfit(model=model,data=ciidataobj,marq=1.5)
+         optimiser.refine(ncycles=5,quiet=0)
          print "%4d %4d %f %f %f %f"%(i,j,t[0],t[1],t[2],optimiser.chi2) 
          map[i,j]=optimiser.chi2
    end=time.time()
@@ -9489,8 +9592,8 @@ if __name__=="__main__":
    def help():
       from tkMessageBox import showinfo
       showinfo("Help","Sorry, no help for you!\nPlease try harder")
-   linarpcredits = open("linarp.credits","r").read() 
-   license = open("LICENSE","r").read()
+   linarpcredits = """@< linarp.credits @>"""
+   license = """@< LICENSE @>"""
 
    def credits():
       from tkMessageBox import showinfo
@@ -10140,7 +10243,7 @@ __asm__("clc \n\t"\
 
 Linarp builds on the work of many other people. These are some of them.
 
-@o linarp.credits
+@d linarp.credits
 @{Thanks to:
  Larry Finger for peak function "profval"
  Ralf Grosse Kunstleve for cctbx
@@ -10249,7 +10352,10 @@ defined here.
 
 Now for the GPL itself. Rather long, isn't it.
 
-@O LICENSE
+@o LICENSE.TXT
+@{ @< LICENSE @> @}
+
+@d LICENSE
 @{
 		    GNU GENERAL PUBLIC LICENSE
 		       Version 2, June 1991
