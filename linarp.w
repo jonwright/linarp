@@ -1830,13 +1830,32 @@ Depends on personal taste I guess?
 @{
 """ Dataset object for powder data """
 @<pycopyright@>
+from Numeric import *
 class powderdata:
    def __init__(self,x,y,e,d):
       """ x = x values, y = y values, e = errors, d = dictionary """
-      self.x=x
-      self.y=y
-      self.e=e
+      self.x=self.xfull=x
+      self.y=self.yfull=y
+      self.e=self.efull=e
       self.d=d
+      self.npoints=self.x.shape[0]
+
+   def setrange(self,lh=None):
+      """ Set the active range """
+      if lh==None:
+         self.x=self.xfull
+         self.y=self.yfull
+         self.e=self.efull
+         self.d["active_range"]=None
+         self.npoints=self.x.shape[0]
+      else:
+         l=searchsorted(self.x,lh[0])
+         h=searchsorted(self.x,lh[1])
+         self.x=self.xfull[l:h]
+         self.y=self.yfull[l:h]
+         self.e=self.efull[l:h]
+         self.d["active_range"]=lh
+         self.npoints=self.x.shape[0]
 @}
 
 The various dictionary items which you might need are defined here.
@@ -2348,39 +2367,82 @@ which x-points it calls the model for.
 
 A simple class to implement a model is then:
 
-@o modelclass.py
+@o model.py
 @{
 @< pycopyright @>
 from Numeric import *
 class model:
-   """ Returns zero everywhere """
-   def __init__(self):
-      self.nv=0
-   def compute(self,x):
-      ycalc=0
-      iw=array([-1],Int)
-      di=array([0.],Float)
-      return ycalc,iw,di
+   """
+   Intended as a base class for inheriting - you need to set up a list
+   called self.variables and it will set up arrays to hold them and 
+   handle most of the talking to optimisers
+   """
+   def __init__(self,**kwds):
+      self.vd={}         # Dictionary to find variables in variable value array (vv)
+      self.set={}        # Dictionary indicating whether variables are initialised
+      i=0
+      for item in self.variables: 
+         self.vd[item]=i        # Number the variables into arrays
+         self.set[item]=False   # Indicate values have not been initialised
+         i+=1
+      # variable values and error bar array
+      self.vv=zeros(len(self.variables),Float32)
+      self.ve=zeros(len(self.variables),Float32)
+      # Fill out any variable values which are present
+      for key in kwds.keys():
+         try: 
+            self.vv[self.vd[key]] = kwds[key]
+            self.set[key]=True
+         except KeyError:
+            print "Unrecognised Keyword argument:",key,"=",kwds[key]
+      self.ycalc=None
+
+   def compute(self,data):
+      pass
+
+   def gradient(self,variable):
+      pass
+
+   def apply_shift(self,variable,shift):
+      self.vv[self.vd[variable]] = self.vv[self.vd[variable]] + shift
+
+   def set_value(self,variable,value):
+      self.vv[self.vd[variable]] = value
+      self.set[variable]=True
+
+   def get_value(self,variable):
+      return self.vv[self.vd[variable]]
+
+   def set_errorbar(self,variable,value):
+      self.ve[self.vd[variable]] = value
+
+   def get_errorbar(self,variable):
+      return self.ve[self.vd[variable]] 
+
+
+   def get_variables(self):
+       return self.variables
 @}
 
-Then to refine a single constant value:
+Then to refine a single constant value we only need to fill out the list
+of variables being used and override the compute and gradient methods.
 
 @o constantmodel.py
 @{
 @< pycopyright @>
 import modelclass
+from Numeric import *
 class constantmodel(model):
-   def __init__(self,y):
-      """ A single constant value """
-      self.y=y
-      self.nv=1
-   def compute(self,x):
-      ycalc=self.y
-      iw=array([0 ,-1],Int)
-      di=array([1.,0.],Float)
-      return ycalc,iw,di
-   def applyshift(self,shift):
-      self.y+=shift
+   def __init__(self,**kwds):
+      """ A single constant value, call constantmodel(constant=y) """
+      self.variables["constant"]
+      model.__init__(**kwds)
+
+   def compute(self,data):
+      self.ycalc=ones(data.y.shape,Float32)*self.vv[self.vd['constant']]
+
+   def gradient(self,variable):
+      return ones(self.ycalc.shape,Float32)
 @}
 
 etc...
@@ -2448,6 +2510,104 @@ symmetry when filling it in and inverting it.
 Using the model class from the model section, dense gradients just implies
 that the derivative list will always be full. 
 
+@o fitdensemodels1d.py
+@{
+""" Least squares optimisation for dense models and 1D weights """
+@< pycopyright @>
+import time
+from Numeric import *
+from LinearAlgebra import generalized_inverse
+class fitdensemodels1d:
+   def __init__(self,model=None,data=None,marq=None):
+      """
+      Optimises a model against a set of data
+      The data should provide array members data.y and data.e which
+        are used for the observed data values and error bars
+      The model should generate an array member model.ycalc of the
+        same dimension as the data.y. It might call on other information
+        in the data object to do that.
+        The model must also supply a list of variables (strings) accessible
+        via a "get_variables()" member function.
+        It must also supply a function to apply shifts
+        Mainly the model supplies a "compute" member function which creates
+        a member ycalc array (the computed model) and a 2D array of gradients
+        holding d{model.ycalc}/d{variable}. Positions of the variables in
+        the gradients array is given by the member model.grad_loc dictionary.
+      """
+      self.data=data
+      self.model=model
+      self.variables=model.get_variables() # make a copy
+      self.vd = {} # dictionary for labelling variables
+      i=0
+      # Positions of variables in least squares matrix
+      for item in self.variables: self.vd[item]=i; i+=1
+      self.nv=len(self.variables)
+      self.icyc=0
+      if marq==None: 
+         self.marq=1.0
+      else:
+         self.marq=marq
+
+   def refine(self, ncycles=1):
+      start=time.time()
+      end=self.icyc+ncycles
+      while self.icyc < end: 
+         self.model.compute(self.data)   # model only knows about data when computing
+         obsminuscalc=self.data.y-self.model.ycalc
+         g=zeros((self.data.npoints,self.nv),Float32)               # gradient array
+         for i in range(self.nv):
+               g[:,i] = (self.model.gradient(self.variables[i]) / self.data.e).astype(Float32)
+         self.lsqmat=matrixmultiply(transpose(g),g)
+         self.rhs=matrixmultiply(obsminuscalc/self.data.e,g)
+         # Error bars
+         self.emat=self.generalized_inverse(self.lsqmat)
+         # damping:
+         if self.marq != 1.:
+            for i in range(self.nv):
+               self.lsqmat[i,i] = self.marq*self.lsqmat[i,i]
+         # invert to find shift (no need really...)
+         self.inverse=self.generalized_inverse(self.lsqmat)
+         shifts = matrixmultiply(self.inverse,self.rhs).astype(Float32)
+         self.chi2=sum(obsminuscalc*obsminuscalc/self.data.e/self.data.e)
+         self.reducedchi2=self.chi2/(self.data.npoints-self.nv)
+         print "Cycle ",self.icyc," chi^2 = ",self.chi2, "Reduced chi^2=",self.reducedchi2
+         for item in self.variables:
+            self.model.apply_shift(item,shifts[self.vd[item]])
+         self.icyc+=1
+      #
+      # End cycles loop
+      print "Variable  Value           Esd             Shift           Shift/esd"
+      for item in self.variables:
+         i=self.vd[item]
+         e=sqrt(self.emat[i,i]*self.reducedchi2)
+         self.model.set_errorbar(item,e)
+         print "%8s  %-10.7e"%( item,self.model.get_value(item)),
+         if e>0.:
+            print " %-10.7e  %-10.7e  %-10.7e"%(e, shifts[i] , shifts[i]/e )
+         else:
+            print "Hopefully not refined"
+      print "Time for that cycle was:",time.time()-start
+         
+   def generalized_inverse(self,matrix):
+       # marker to try out or not scaling the matrix
+       # I hope the LinearAlgebra package does not need this??
+       # The idea is to make the diagonal of the matrix have equal elements
+       # which is equivalent to making all variables be in units of ~1 esd
+       s=sqrt(diagonal(matrix))
+       mycopy=matrix.copy().astype(Float)
+       for i in range(matrix.shape[0]):
+          if s[i]>0.:
+             mycopy[i,:]=mycopy[i,:]/s[i]
+             mycopy[:,i]=mycopy[:,i]/s[i]
+          else:
+             mycopy[:,i]=0. ; mycopy[i,:]=0.; mycopy[i,i]=1. ; s[i]=1.
+       inv = generalized_inverse(mycopy)   
+       for i in range(matrix.shape[0]):
+          inv[i,:]=inv[i,:]/s[i]
+          inv[:,i]=inv[:,i]/s[i]
+       return inv
+
+@}
 
 \section{Sparse gradients, 1D weight matrix}
 
@@ -2990,94 +3150,90 @@ function. It will take a x,y,e arrays as arguements and optional
 parameters for the initial estimates. Need to estimate
 the initial values if they are not present.
 
-@o peakfit.py
+@o profvalplusback.py
 @{
 @< pycopyright @>
 from Numeric import *
-from LinearAlgebra import generalized_inverse
+import model
 import profval
-import time
-class peakfitter:
-   def __init__(self,x,y,e,**kwds):
+class profvalplusback(model.model):
+   def __init__(self,**kwds):
       """
       Fits a single peak to some data
-      x,y,e are Numeric arrays - assumed 1D, float32, same size
-      optional arguments will be estimated if not present
+      Optional arguments will be estimated when computing if not present
       You are expected to "know" that keyword args are used to supply
       initial estimated values - and get those keywords from the variable
       name list
       """
-      self.x=x.astype(Float32)
-      self.y=y.astype(Float32)
-      self.e=e.astype(Float32)
-      self.w=(1./(e*e)).astype(Float32)
       self.variables=['back','area','center','width','eta','s_l','d_l']
-      self.vd = {} # dictionary for labelling variables
-      i=0
-      for item in self.variables: self.vd[item]=i; i+=1
-      self.icyc=0
-      # variable values
-      self.vv=zeros(len(self.variables),Float32)
-      # errors on variables
-      self.ve=zeros(len(self.variables),Float32)
-      # Fill out any variable values which are present
-      for key in kwds.keys():
-         try: 
-            self.vv[self.vd[key]] = kwds[key]
-         except KeyError:
-            print "Unrecognised Keyword argument:",key,"=",kwds[key]
       self.use_asym=0
       if "s_l" in kwds.keys(): self.use_asym=1
-      self.ycalc=None
-      self.estimate(kwds)
+      if "d_l" in kwds.keys(): self.use_asym=1
+      model.model.__init__(self,**kwds)
       # Gradients are ycalc[0]/area for area
       #               1             for back
-      self.gl={} # gradient lookups
+      self.gl={} # gradient location lookups
       self.gl['center']=1  #               ycalc[1] for center
       self.gl['width'] =2  #               ycalc[2] for width
       self.gl['eta']   =3  #               ycalc[3] for eta
-      if self.use_asym==1: 
-         self.gl['s_l']  =4  #            ycalc[4] for s_l
-         self.gl['d_l']  =5  #            ycalc[5] for d_l
-      self.compute()
+      self.gl['s_l']   =4  #               ycalc[4] for s_l
+      self.gl['d_l']   =5  #               ycalc[5] for d_l
 
-   def estimate(self,kwds):
-      xymax=argmax(self.y)
-      xymin=argmin(self.y)
-      if 'back' not in kwds.keys():
-         self.vv[self.vd['back']]=self.y[xymin]
-      if 'center' not in kwds.keys():
-         self.vv[self.vd['center']]=self.x[xymax]
-#         print self.x[xymax],self.y[xymax],self.e[xymax]
-      if 'width' not in kwds.keys():
+   def get_variables(self):
+      """
+      Override the default behaviour by turning off s_l/d_l if we want to
+      """
+      if self.use_asym==1: return self.variables
+      else:                return self.variables[0:5]
+
+   def estimate(self,data):
+      xymax=argmax(data.y)
+      xymin=argmin(data.y)
+      if not self.set['back']:
+         self.vv[self.vd['back']]=data.y[xymin]
+         self.set['back']=True
+      if not self.set['center']:
+         self.vv[self.vd['center']]=data.x[xymax]
+         self.set['center']=True
+      if not self.set['width']:
       # have to walk array
-         halfway=0.5*(self.y[xymin]+self.y[xymax])
+         halfway=0.5*(data.y[xymin]+data.y[xymax])
          i=xymax
          while i > 0: 
             i=i-1
-            if self.y[i]<halfway:
-               xl=self.x[i]
+            if data.y[i]<halfway:
+               xl=data.x[i]
                break
-            xl=self.x[0]
+            xl=data.x[0]
          i=xymax
-         while i < self.x.shape[0]: 
+         while i < data.x.shape[0]: 
             i=i+1
-            if self.y[i]<halfway:
-               xh=self.x[i]
+            if data.y[i]<halfway:
+               xh=data.x[i]
                break
-            xh=self.x[-1]
-      print xl,xh,kwds.keys()
+            xh=data.x[-1]
       self.vv[self.vd['width']] = abs(xl-xh)
-      if 'eta' not in kwds.keys() : self.vv[self.vd['eta']]=0.1
-      if 's_l' not in kwds.keys() or 'd_l' not in kwds.keys():
-         self.use_asym=0
-         self.vv[self.vd['s_l']]=0. ; self.vv[self.vd['d_l']]=0.
-      else: 
-         self.use_asym=1
-      if self.vv[self.vd['area']] not in kwds.keys():
-         self.vv[self.vd['area']]=self.vv[self.vd['width']]*(self.y[xymax]-self.y[xymin])
+         self.set['width']=True
+      if not self.set['eta']:
+         self.vv[self.vd['eta']]=0.5
+         self.set['eta']=True
+      if not self.set['area']:
+         self.vv[self.vd['area']]=self.vv[self.vd['width']]*(data.y[xymax]-data.y[xymin])
+         self.set['area']=True
+      if not self.set['s_l'] and self.use_asym==1:
+         self.vv[self.vd['s_l']]=0.0005
+         self.set['s_l']=True
+      if not self.set['d_l'] and self.use_asym==1:
+         self.vv[self.vd['d_l']]=0.0005
+         self.set['d_l']=True
+      if self.use_asym==0:
+         self.vv[self.vd['s_l']]=self.vv[self.vd['d_l']]=0.
+         self.set['s_l']=True
+         self.set['d_l']=True
 
-   def compute(self):
+
+   def compute(self,data):
+      if False in self.set.values(): self.estimate(data)
       eta    = self.vv[self.vd['eta']]
       center = self.vv[self.vd['center']]
       gamma  = self.vv[self.vd['width']]
@@ -3085,76 +3241,31 @@ class peakfitter:
       d_l    = self.vv[self.vd['d_l']]
       area   = self.vv[self.vd['area']]
       #print "Computing ",eta,gamma,s_l,d_l,center,area,self.use_asym
-      self.ycalc=profval.profval_array(eta, gamma, s_l, d_l,self.x.astype(Float32),
+      self.pva=profval.profval_array(eta, gamma, s_l, d_l,data.x.astype(Float32),
                center, area, self.use_asym)
-      return self.ycalc[0]+self.vv[self.vd['back']]
+      self.ycalc=self.pva[0]+self.vv[self.vd['back']]
 
-   def refine(self, ncycles=1):
-      start=time.time()
-      end=self.icyc+ncycles
-      while self.icyc < end: 
-         if self.ycalc==None: self.compute()
-         nv=len(self.variables)
-         if self.use_asym==0: 
-            nv-=2 # rely on s_l and d_l as last two
-         obsminuscalc=self.y-self.ycalc[0]-self.vv[self.vd['back']]
-         g=zeros((self.x.shape[0],nv),Float32)               # gradient array
-         g[:, self.vd['back'] ]=(1/self.e).astype(Float32)   # 1.*self.w background
-         g[:, self.vd['area'] ]=(self.ycalc[0]/self.vv[self.vd['area']]/self.e).astype(Float32)
-         if self.icyc>0:   # DON'T REFINE DIFFICULT STUFF ON FIRST CYCLE!
-            for item in self.gl.keys():
-               g[:, self.vd[item]  ]=(self.ycalc[ self.gl[item] ]/self.e).astype(Float32)
-         self.lsqmat=matrixmultiply(transpose(g),g)
-         self.emat=self.generalized_inverse(self.lsqmat)
-         # damping:
-         if self.use_asym==1:
-            damp=1.5
-            self.lsqmat[self.vd['s_l'],self.vd['s_l']] =damp*self.lsqmat[self.vd['s_l'],self.vd['s_l']]
-            self.lsqmat[self.vd['d_l'],self.vd['d_l']] =damp*self.lsqmat[self.vd['d_l'],self.vd['d_l']]
-         self.rhs=matrixmultiply(obsminuscalc/self.e,g)
-         self.inverse=self.generalized_inverse(self.lsqmat)
-         shifts = matrixmultiply(self.inverse,self.rhs).astype(Float32)
-         self.chi2=sum(obsminuscalc*obsminuscalc*self.w)
-         self.reducedchi2=self.chi2/(self.x.shape[0]-nv)
-         print "Cycle ",self.icyc," chi^2 = ",self.chi2, "Reduced chi^2=",self.reducedchi2
-         self.vv[0:nv]=self.vv[0:nv]+shifts
-         # should put in generalised variable limits
-         if self.vv[self.vd['s_l']] < 0. : self.vv[self.vd['s_l']] = 0.
-         if self.vv[self.vd['d_l']] < 0. : self.vv[self.vd['d_l']] = 0.
-         self.ycalc=None # Old gradients and fit are now invalid
-         self.icyc+=1
-      #
-      # End cycles loop
-      print "Variable  Value           Esd             Shift           Shift/esd"
-      for item in self.variables[0:nv]:
-         i=self.vd[item]
-         e=sqrt(self.emat[i,i]*self.reducedchi2)
-         self.ve[i]=e
-         print "%8s  %-10.7e"%( item,self.vv[i]),
-         if e>0.:
-            print " %-10.7e  %-10.7e  %-10.7e"%(e, shifts[i] , shifts[i]/e )
-         else:
-            print "Hopefully not refined"
-      print "Time for that cycle was:",time.time()-start
+   def gradient(self,variable):
+      """
+      self.pva is a tuple holding:
+       ( peak_calc, dprdt , dprdg, dprde, dprds, dprdd )
+      Returns the appropriate bit of it via the dictionary self.gl (gradient location)
+      """
+      if variable=='area':
+         return self.ycalc/self.vv[self.vd['area']]
+      if variable=='back':
+         return ones(self.ycalc.shape,Float32)
+      return self.pva[ self.gl[variable]  ] 
+@}
+
+
+@o peakfit.py
+@{
+@< pycopyright @>
+
+import profvalplusback
+import fitdensemodels1d
          
-   def generalized_inverse(self,matrix):
-       # marker to try out or not scaling the matrix
-       # I hope the LinearAlgebra package does not need this??
-       # The idea is to make the diagonal of the matrix have equal elements
-       # which is equivalent to making all variables be in units of ~1 esd
-       s=sqrt(diagonal(matrix))
-       mycopy=matrix.copy().astype(Float)
-       for i in range(matrix.shape[0]):
-          if s[i]>0.:
-             mycopy[i,:]=mycopy[i,:]/s[i]
-             mycopy[:,i]=mycopy[:,i]/s[i]
-          else:
-             mycopy[:,i]=0. ; mycopy[i,:]=0.; mycopy[i,i]=1. ; s[i]=1.
-       inv = generalized_inverse(mycopy)   
-       for i in range(matrix.shape[0]):
-          inv[i,:]=inv[i,:]/s[i]
-          inv[:,i]=inv[:,i]/s[i]
-       return inv
 
 if __name__=="__main__":
    import epffile, powbase, mcadata, sys
@@ -3174,14 +3285,16 @@ if __name__=="__main__":
          print "Could not read your file %s" % (sys.argv[1])
          raise
    if len(sys.argv)>3:
-      xlow =searchsorted(dat.x,float(sys.argv[3]))
-      xhigh=searchsorted(dat.x,float(sys.argv[4]))
-      pf=peakfitter(dat.x[xlow:xhigh],dat.y[xlow:xhigh],dat.e[xlow:xhigh])
-   else:
-      pf=peakfitter(dat.x,dat.y,dat.e)
-   pf.refine(ncycles=10)
+      lh=map(float,sys.argv[3:5])
+      lh.sort()
+      dat.setrange(lh)
+   model=profvalplusback.profvalplusback()
+   optimiser=fitdensemodels1d.fitdensemodels1d(model=model,data=dat)
+   optimiser.refine(ncycles=1)
+   while raw_input("More cycles?") != "":
+      optimiser.refine(ncycles=1)
+@}
 
-@} 
 
 \chapter{Peak center functions}
 
@@ -8340,29 +8453,28 @@ import Tkinter as Tk
 import tkFileDialog
 import sys,os,time
 
-import peakfit
+import powderdata
+import profvalplusback
+import fitdensemodels1d
 
 
 class twodplot:
    def __init__(self,dat):
       self.f = Figure(figsize=(5,4), dpi=100)
       self.a = self.f.add_subplot(111)
-      self.a.plot(dat.x,dat.y)
-      self.x=dat.x
-      self.y=dat.y
-      self.e=dat.e
-      if dat.d.has_key("xunits"):
+      self.dat=dat
+      self.model=None
+      self.a.plot(self.dat.x,self.dat.y)
+      if self.dat.d.has_key("xunits"):
          self.a.set_xlabel(dat.d["xunits"])
-      if dat.d.has_key("yunits"):
+      if self.dat.d.has_key("yunits"):
          self.a.set_ylabel(dat.d["yunits"])
-      if dat.d.has_key("title"):
+      if self.dat.d.has_key("title"):
          self.a.set_title(dat.d["title"])
          self.title=dat.d["title"]
-      elif dat.d.has_key("fromfile"):
+      elif self.dat.d.has_key("fromfile"):
          self.a.set_title(dat.d["fromfile"])
          self.title=dat.d["fromfile"]
-
-#      self.f.add_axis(self.a)
 
       # a tk.DrawingArea
       self.canvas = FigureCanvasTkAgg(self.f, master=root)
@@ -8388,21 +8500,15 @@ class twodplot:
       self.bf.pack(side=Tk.BOTTOM)
       self.xfull=self.a.get_xlim()
       self.yfull=self.a.get_ylim()
-      self.peakfitter=None
-      self.dataline=self.a.get_lines()[0]
+      self.model=None
+
 
    def openxye(self):
-      print "Calling askopen"
       fn=tkFileDialog.askopenfilename(initialdir=os.getcwd())
-      print fn
-#      fn=raw_input("file?")
-      dat=epffile.epffile(fn)
+      self.dat=epffile.epffile(fn)
       self.a.cla()
       time.sleep(1)
-      self.a.plot(dat.x,dat.y)
-      self.x=dat.x
-      self.y=dat.y
-      self.e=dat.e
+      self.a.plot(self.dat.x,self.dat.y)
       self.xfull=self.a.get_xlim()
       self.yfull=self.a.get_ylim()
       self.a.set_xlim(self.xfull)
@@ -8410,16 +8516,10 @@ class twodplot:
       self.canvas.show()
 
    def openmca(self):
-      print "Calling askopen"
       fn=tkFileDialog.askopenfilename(initialdir=os.getcwd())
-#      fn=raw_input("file?")
-      dat=mcadata.mcadata(fn)
+      self.dat=mcadata.mcadata(fn)
       self.a.cla()
-      time.sleep(1)
-      self.a.plot(dat.x,dat.y)
-      self.x=dat.x
-      self.y=dat.y
-      self.e=dat.e
+      self.a.plot(self.dat.x,self.dat.y)
       self.xfull=self.a.get_xlim()
       self.yfull=self.a.get_ylim()
       self.a.set_xlim(self.xfull)
@@ -8429,32 +8529,36 @@ class twodplot:
 
 
    def pf(self):
-      if self.peakfitter==None:
-         self.estimate()
-      self.peakfitter.refine(ncycles=5)
-      self.yc=self.peakfitter.compute()
+      self.optimiser.refine(ncycles=10)
+      self.replot()
+
+   def estimate(self):
+      self.dat.setrange(self.a.get_xlim())
+      self.model=profvalplusback.profvalplusback()
+      self.optimiser=fitdensemodels1d.fitdensemodels1d(model=self.model,data=self.dat)
+      self.optimiser.refine(ncycles=10)
+      self.replot()
+
+
+   def replot(self):
       xr=self.a.get_xlim()
       yr=self.a.get_ylim()
       self.a.clear()
       self.a.set_title(self.title)
-      self.a.plot(self.x,self.y)
-      self.a.plot(self.x[self.xl:self.xh],self.yc,'g')
+      self.a.plot(self.dat.x,self.dat.y)
+      if self.model != None:
+         self.a.plot(self.dat.x,self.model.ycalc,'g')
       middle=0.5*(yr[0]+yr[1])
-      self.a.plot(self.x[self.xl:self.xh],middle+self.y[self.xl:self.xh]-self.yc,'r')
+         self.a.plot(self.dat.x,middle+self.dat.y-self.model.ycalc,'r')
+         self.label.config(text="Position: %f +/- %f" % (
+                   self.model.get_value('center'),
+                   self.model.get_errorbar('center'))  )
       self.a.set_xlim(xr)
       self.a.set_ylim(yr)
       self.canvas.show()
-      self.label.config(text="Position: %f +/- %f" % (
-                   self.peakfitter.vv[self.peakfitter.vd['center']],
-                   self.peakfitter.ve[self.peakfitter.vd['center']]) )
 
-   def estimate(self):
-      lims = self.a.get_xlim()
-      self.xl=xl=searchsorted(self.x, lims[0])
-      self.xh=xh=searchsorted(self.x, lims[1])
-      self.peakfitter=peakfit.peakfitter(self.x[xl:xh],self.y[xl:xh],self.e[xl:xh])
-#         s_l=0.004, d_l=0.006)
-      self.pf()
+
+
 
    def logy(self): 
 # FIXME - clip negative values before making logscaled
@@ -8472,8 +8576,12 @@ class twodplot:
       self.canvas.show()
 
    def on_3(self,event):
+      self.dat.setrange()
+      self.a.cla()
+      self.a.plot(self.dat.x, self.dat.y)
       self.a.set_xlim(self.xfull)
       self.a.set_ylim(self.yfull)
+      self.model=None
       self.canvas.show()
 
    def on_2(self,event):
