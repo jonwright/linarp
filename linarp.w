@@ -1206,8 +1206,11 @@ class powderdata:
       """ x = x values, y = y values, e = errors, d = dictionary """
       self.x=self.xfull=x
       self.y=self.yfull=y
-      self.e=self.efull=e
-      self.w=self.wfull=(1./(self.efull*self.efull)).astype(Float32)
+      if e==None:
+         self.e=self.efull=n.ones(self.xfull.shape,n.Float32)
+      else:
+         self.e=self.efull=e
+      self.w=self.wfull=(1./(self.efull*self.efull)).astype(n.Float32)
       self.d=d
       self.npoints=self.x.shape[0]
 
@@ -1346,7 +1349,7 @@ class powbase(powderdata):
       low=None
       for line in open(filename).readlines():
          if line[0] in ["!","#"]:
-            if d.haskey("comment"):
+            if d.has_key("comment"):
                d["comment"]="%s\n%s"%(d["comment"],line)
             else:
                d["comment"]=line
@@ -2384,7 +2387,7 @@ import cctbxfcalc  # For a set of fcalc numbers
 class solventrefinedata(ciidata.ciidata):
    def __init__(self,dilsfile, cclfile, pdbfile):
       ciiobj = cii.ciimatrix(dilsfile)
-      fcalc = cctbxfcalc.getfcalcfrompdb(pdbfile,ciiobj.HKL.astype(Int).tolist())
+      fcalc = cctbxfcalc.getfcalcfrompdb(pdbfile,ciiobj.HKL.astype(n.Int).tolist())
       fsq=abs(fcalc).astype(n.Float32)
       fsq=fsq*fsq*1e-6
       d={}
@@ -2395,7 +2398,7 @@ class solventrefinedata(ciidata.ciidata):
       d['rm'] = n.array( [ [ a*a, a*b*cos(gamma*pi/180) , a*c*cos(beta *pi/180) ] ,
                            [ a*b*cos(gamma*pi/180) , b*b, b*c*cos(alpha*pi/180) ] ,
                            [ a*c*cos(beta *pi/180) , b*c*cos(alpha*pi/180) , c*c] ] )
-      d['rcm']= n.inverse(d['rm'])
+      d['rcm']= inverse(d['rm'])
       ciidata.ciidata.__init__(self,ciiobj ,d)
       self.setfsq(fsq)
 
@@ -2635,6 +2638,7 @@ of statistical weights into the data object.
 @< pycopyright @>
 import time
 import Numeric
+import math # for sqrt
 from LinearAlgebra import generalized_inverse
 class densemodelfit:
    def __init__(self,model=None,data=None,marq=None):
@@ -2711,7 +2715,7 @@ class densemodelfit:
       print "Variable  Value           Esd             Shift           Shift/esd"
       for item in self.variables:
          i=self.vd[item]
-         e=sqrt(self.emat[i,i])
+         e=math.sqrt(self.emat[i,i])
          self.model.set_errorbar(item,e)
          print "%8s  %-10.7e"%( item,self.model.get_value(item)),
          if e>0.:
@@ -2727,18 +2731,18 @@ class densemodelfit:
        # The idea is to make the diagonal of the matrix have equal elements
        # which is equivalent to making all variables be in units of ~1 esd
        try:
-          s=Numeric.sqrt(Numeric.diagonal(matrix))
+          s=Numeric.sqrt(Numeric.diagonal(matrix)).astype(Numeric.Float32)
        except ValueError:
           print "Least squares matrices should always (by definition) have positive",\
                 "diagonal elements"
           print matrix
           print Numeric.diagonal(matrix)
           raise
-       mycopy=matrix.copy()
+       mycopy=matrix.copy().astype(Numeric.Float) # Daft upcasting problems  
        for i in range(matrix.shape[0]):
           if s[i]>0.:
-             mycopy[i,:]=mycopy[i,:]/s[i]
-             mycopy[:,i]=mycopy[:,i]/s[i]
+             mycopy[i,:]=(mycopy[i,:]/s[i])
+             mycopy[:,i]=(mycopy[:,i]/s[i])
           else:
              mycopy[:,i]=0. ; mycopy[i,:]=0.; mycopy[i,i]=1. ; s[i]=1.
        inv = generalized_inverse(mycopy)   
@@ -3401,11 +3405,11 @@ import profval
 class profvalplusback(model.model):
    def __init__(self,**kwds):
       """
+      arglist = back,area,center,width,eta,s_l,d_l
       Fits a single peak to some data
       Optional arguments will be estimated when computing if not present
-      You are expected to "know" that keyword args are used to supply
-      initial estimated values - and get those keywords from the variable
-      name list
+      If both s_l and d_l are zero the peak is assumed to have
+      no low angle asymmetry contribution and these are fixed at zero.
       """
       self.variables=['back','area','center','width','eta','s_l','d_l']
       self.use_asym=0
@@ -3483,7 +3487,7 @@ class profvalplusback(model.model):
       d_l    = self.vv[self.vd['d_l']]
       area   = self.vv[self.vd['area']]
       #print "Computing ",eta,gamma,s_l,d_l,center,area,self.use_asym
-      self.pva=profval.profval_array(eta, gamma, s_l, d_l,data.x.astype(Float32),
+      self.pva=profval.profval_array(eta, gamma, s_l, d_l,data.x.astype(n.Float32),
                center, area, self.use_asym)
       self.ycalc=self.pva[0]+self.vv[self.vd['back']]
 
@@ -3494,9 +3498,9 @@ class profvalplusback(model.model):
       Returns the appropriate bit of it via the dictionary self.gl (gradient location)
       """
       if variable=='area':
-         return (self.ycalc/self.vv[self.vd['area']]).astype(Float32)
+         return (self.ycalc/self.vv[self.vd['area']]).astype(n.Float32)
       if variable=='back':
-         return ones(self.ycalc.shape,Float32)
+         return n.ones(self.ycalc.shape,n.Float32)
       return self.pva[ self.gl[variable]  ] 
 @}
 
@@ -8277,6 +8281,7 @@ It will try to refine the overall scale and two solvent scattering parameters.
 @< pycopyright @>
 import Numeric as n
 import model
+from math import exp
 class solventmodel(model.model):
    def __init__(self,**kwds):
       self.variables=['scale','Asolv','Bsolv']
@@ -8328,6 +8333,7 @@ if __name__=="__main__":
    obs= sum(ciidataobj.ciiobject.Ihkl)
    s = obs/calc
    model = solventmodel(Asolv=Asolv,Bsolv=Bsolv,scale=s)
+
 
    optimiser = densemodelfit.densemodelfit(model=model,data=ciidataobj,marq=2.0)
    
@@ -8711,19 +8717,19 @@ python.
 Most developed seems to the the matplotlib package 
 from John Hunter.
 
-A two dimensional tk based plotting widget from that package is.
+A two dimensional tk based plotting widget from that package is as 
+follows. This was sort of hacked together at an early stage of 
+developement and then tidied up a bit.
 
-This was sort of hacked together at an early stage of developement.
+FIXME - add printing support.
 
-@o embedding_in_tk.py
+@o twodplot.py
 @{
 """
 From the matplotlib examples - modified for mouse
 """
 import matplotlib
 matplotlib.use('TkAgg')
-
-from matplotlib.numerix import arange, sin, cos, pi, searchsorted, sqrt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
@@ -8731,31 +8737,18 @@ import Tkinter as Tk
 import tkFileDialog
 import sys,os,time
 
-import powderdata
-import profvalplusback
-import densemodelfit
-import Numeric
-
-class twodplot:
-   def __init__(self,dat):
+class twodplot(Tk.Frame):
+   def __init__(self,parent=None,data=None):
+      Tk.Frame.__init__(self,parent)
       self.f = Figure(figsize=(5,4), dpi=100)
       self.a = self.f.add_subplot(111)
-      self.dat=dat
-      self.model=None
-      self.a.plot(self.dat.x,self.dat.y)
-      if self.dat.d.has_key("xunits"):
-         self.a.set_xlabel(dat.d["xunits"])
-      if self.dat.d.has_key("yunits"):
-         self.a.set_ylabel(dat.d["yunits"])
-      if self.dat.d.has_key("title"):
-         self.a.set_title(dat.d["title"])
-         self.title=dat.d["title"]
-      elif self.dat.d.has_key("fromfile"):
-         self.a.set_title(dat.d["fromfile"])
-         self.title=dat.d["fromfile"]
-
+      self.plotitems=[]
+      if data != None:
+         self.plotitems.append(data)
+      self.title=None
+      self.xr=self.yr=None
       # a tk.DrawingArea
-      self.canvas = FigureCanvasTkAgg(self.f, master=root)
+      self.canvas = FigureCanvasTkAgg(self.f, master=self)
       self.canvas.show()
       self.tkc=self.canvas.get_tk_widget()
       self.tkc.pack(side=Tk.TOP, fill=Tk.BOTH, expand=1)
@@ -8765,108 +8758,41 @@ class twodplot:
       self.tkc.bind("<ButtonPress-2>",self.on_2)
       self.tkc.bind("<ButtonPress-3>",self.on_3)
       self.rubberbandbox=None
-      self.label=Tk.Label(master=root, text="Status Bar")
-      self.label.pack(side=Tk.TOP)
-      self.bf=Tk.Frame(master=root)
-      Tk.Button(master=self.bf, text='Quit', command=root.destroy).pack(side=Tk.RIGHT)
+      self.bf=Tk.Frame(self)
       Tk.Button(master=self.bf, text='LogY', command=self.logy).pack(side=Tk.LEFT)
       Tk.Button(master=self.bf, text='LogX', command=self.logx).pack(side=Tk.LEFT)
-      Tk.Button(master=self.bf, text='Open xye File', command=self.openxye).pack(side=Tk.LEFT)
-      Tk.Button(master=self.bf, text='Open mca File', command=self.openmca).pack(side=Tk.LEFT)
-      Tk.Button(master=self.bf, text='Open DILS File', command=self.opendil).pack(side=Tk.LEFT)
-      Tk.Button(master=self.bf, text="Fit peak", command=self.estimate).pack(side=Tk.LEFT)
-      Tk.Button(master=self.bf, text="Refine prev peak", command=self.pf).pack(side=Tk.LEFT)
       self.bf.pack(side=Tk.BOTTOM)
-      self.xfull=self.a.get_xlim()
-      self.yfull=self.a.get_ylim()
-      self.model=None
-
-
-   def openxye(self):
-      fn=tkFileDialog.askopenfilename(initialdir=os.getcwd())
-      self.dat=epffile.epffile(fn)
-      self.a.cla()
-      time.sleep(1)
-      self.a.plot(self.dat.x,self.dat.y)
-      self.xfull=self.a.get_xlim()
-      self.yfull=self.a.get_ylim()
-      self.a.set_xlim(self.xfull)
-      self.a.set_ylim(self.yfull)
-      self.canvas.show()
-
-   def openmca(self):
-      fn=tkFileDialog.askopenfilename(initialdir=os.getcwd())
-      self.dat=mcadata.mcadata(fn)
-      self.a.cla()
-      self.a.plot(self.dat.x,self.dat.y)
-      self.xfull=self.a.get_xlim()
-      self.yfull=self.a.get_ylim()
-      self.a.set_xlim(self.xfull)
-      self.a.set_ylim(self.yfull)
-      self.canvas.show()
-
-   def opendil(self):
-      import solventrefinedata, solventmodel
-
-      ciifile=tkFileDialog.askopenfilename(initialdir=os.getcwd(),title="dils file?")
-      cclfile=tkFileDialog.askopenfilename(initialdir=os.getcwd(),title="ccl file?")
-      pdbfile=tkFileDialog.askopenfilename(initialdir=os.getcwd(),title="pdb file?")
-      self.dat=solventrefinedata.solventrefinedata(ciifile,cclfile,pdbfile)
-      # estimate the scale factor:
-      calc=sum(self.dat.fsq)
-      obs= sum(self.dat.ciiobject.Ihkl)
-      s = obs/calc
-      self.model = solventmodel.solventmodel(Asolv=0.89,Bsolv=40.0,scale=s)
-      self.optimiser=densemodelfit.densemodelfit(model=self.model,data=self.dat)
-      self.optimiser.refine(ncycles=10)
-      self.a.cla()
-      self.a.plot(self.dat.x,self.dat.y)
-      self.xfull=self.a.get_xlim()
-      self.yfull=self.a.get_ylim()
-      self.a.set_xlim(self.xfull)
-      self.a.set_ylim(self.yfull)
+      self.label=Tk.Label(self,text="Plot window messages")
+      self.label.pack(side=Tk.BOTTOM,fill=Tk.X, expand=0)
+      self.pack(side=Tk.TOP,fill=Tk.BOTH,expand=1)
       self.replot()
-
-
-
-   def pf(self):
-      self.optimiser.refine(ncycles=1)
-      self.replot()
-
-   def estimate(self): 
-      self.dat.setrange(self.a.get_xlim())
-      self.model=profvalplusback.profvalplusback()
-      self.optimiser=densemodelfit.densemodelfit(model=self.model,data=self.dat)
-      self.optimiser.refine(ncycles=10)
-      self.replot()
-
 
    def replot(self):
-      xr=self.a.get_xlim()
-      yr=self.a.get_ylim()
       self.a.clear()
-      self.a.set_title(self.title)
-      self.a.plot(self.dat.x,self.dat.y)
-      if self.model != None:
-         self.a.plot(self.dat.x,self.model.ycalc,'g')
-         middle=0.5*(yr[0]+yr[1])
-         d = self.dat.y-self.model.ycalc
-         d = d * self.dat.weightmatvec(d)
-         d = d * abs(yr[0]-yr[1]) / Numeric.maximum.reduce(d)
-         self.a.plot(self.dat.x, d+middle ,'r')
-      self.a.set_xlim(xr)
-      self.a.set_ylim(yr)
+      if self.title!= None:
+         self.a.set_title(self.title)
+#      b  : blue
+#      g  : green
+#      r  : red
+#      c  : cyan
+#      m  : magenta
+#      y  : yello 
+      c = ['b','g','r','c','m','y']
+      for item in self.plotitems:
+         if item.d.has_key('color'): 
+            pc=item.d['color']
+         else:
+            c.append(c[0])
+            pc=c.pop()
+         self.a.plot(item.x,item.y,color=pc)
+      if self.xr!=None:
+         self.a.set_xlim(self.xr)
+      if self.yr!=None:
+         self.a.set_ylim(self.yr)
       self.canvas.show()
-      if self.model != None:
-         self.label.config(text="Position: %f +/- %f" % (
-                   self.model.get_value('center'),
-                   self.model.get_errorbar('center'))  )
-
-
-
 
    def logy(self): 
-# FIXME - clip negative values before making logscaled
+# FIXME - clip negative values before making logscaled?
       if self.a.yaxis.is_log():
          self.a.set_yscale('linear')
       else:
@@ -8874,6 +8800,7 @@ class twodplot:
       self.canvas.show()
 
    def logx(self): 
+# FIXME - clip negative values before making logscaled?
       if self.a.xaxis.is_log():
          self.a.set_xscale('linear')
       else:
@@ -8881,13 +8808,12 @@ class twodplot:
       self.canvas.show()
 
    def on_3(self,event):
-#      self.dat.setrange()
-#      self.a.cla()
-#      self.a.plot(self.dat.x, self.dat.y)
-      self.a.set_xlim(self.xfull)
-      self.a.set_ylim(self.yfull)
-#      self.model=None
-      self.canvas.show()
+      self.autoscale()
+
+   def autoscale(self):
+      self.a.cla()
+      self.xr = self.yr = None
+      self.replot()
 
    def on_2(self,event):
       height = self.f.bbox.height()
@@ -8920,8 +8846,6 @@ class twodplot:
          # the rectangle makes it to the screen
          # before the next event is handled
          
-
-
    def on_up(self,event):
       # get the x and y coords, flip y from top to bottom
       self.tkc.delete(self.rubberbandbox)
@@ -8934,6 +8858,8 @@ class twodplot:
          # rescale
          xr=[self.xd,self.xu];xr.sort()
          yr=[self.yd,self.yu];yr.sort()
+         self.xr=xr
+         self.yr=yr
          self.a.set_xlim(xr)
          self.a.set_ylim(yr)
          self.canvas.show()
@@ -8959,10 +8885,43 @@ if __name__=="__main__":
 
    root = Tk.Tk()
    root.wm_title("Linarp Is Not A Rietveld Program")
-   p=twodplot(dat)
+   p=twodplot(root,data=dat)
 
    Tk.mainloop()
 
+@}
+
+I hope that is a sufficiently re-usable 2 d plotting widget. 
+It needs to be a little bit more intelligent still so
+that it can plot 2D images as well. Then we should
+be able to overlay images with line data....
+
+\section{File opening}
+
+
+@d junk
+@{
+   def opendil(self):
+      import solventrefinedata, solventmodel
+
+      ciifile=tkFileDialog.askopenfilename(initialdir=os.getcwd(),title="dils file?")
+      cclfile=tkFileDialog.askopenfilename(initialdir=os.getcwd(),title="ccl file?")
+      pdbfile=tkFileDialog.askopenfilename(initialdir=os.getcwd(),title="pdb file?")
+      self.dat=solventrefinedata.solventrefinedata(ciifile,cclfile,pdbfile)
+      # estimate the scale factor:
+      calc=sum(self.dat.fsq)
+      obs= sum(self.dat.ciiobject.Ihkl)
+      s = obs/calc
+      self.model = solventmodel.solventmodel(Asolv=0.89,Bsolv=40.0,scale=s)
+      self.optimiser=densemodelfit.densemodelfit(model=self.model,data=self.dat)
+      self.optimiser.refine(ncycles=10)
+      self.a.cla()
+      self.a.plot(self.dat.x,self.dat.y)
+      self.xfull=self.a.get_xlim()
+      self.yfull=self.a.get_ylim()
+      self.a.set_xlim(self.xfull)
+      self.a.set_ylim(self.yfull)
+      self.replot()
 @}
 
 \section{A more flexible gui for Linarp}
@@ -9002,42 +8961,6 @@ display it. If it is an array we can plot or print it. If it is a list
 or a dictionary we can plop it up in an appropriate window (for
 editing). 
 
-A tree view widget gives a fairly logical way to draw most objects
-on the screen. Plotting  is then a question of selecting the
-x and y arrays from the selection of created objects.
-
-@o guiimports.py
-@{
-""" A list of the things which should be drawable """
-
-# Possible PowderPattern objects
-import powderdata
-import epffile
-import mcadata
-import powbase
-
-# Possible Intensity Objects
-#import shelx
-import ciidata
-
-# Models
-import solventmodel
-
-# Possible Fitting Objects
-import densemodelfit
-
-# Development Objects (likely to be longer)
-import Numeric
-
-@}
-
-So the gui starts up, reads the list of guiobjects
-and offers to create any one of them. So it has a 
-"create new" menu item, an "exit" menu item and
-a help menu to explain that you need to create something. 
-Upon deciding to create something new, for example
-powderdata, the gui needs to know all the possible
-things which are possible.
 
 So the gui pops up with a menu offering to create any of
 those things. It keeps a list of the things you have 
@@ -9051,12 +8974,16 @@ from Tkinter import *
 
 class GuiMaker(Frame):   # Inherit from Tk frame
    menuBar=[]
+   plotitems=[]
    def __init__(self,parent=None):
       Frame.__init__(self,parent)
       self.pack(expand=YES, fill=BOTH)
-      self.start()                     # fills out menu design
+      self.statusbar=Label(self,text="Welcome to Linarp")
+      self.statusbar.pack(side=BOTTOM)
+      self.start()
       self.makeMenuBar()
       self.makeWidgets()
+     
    def makeMenuBar(self):
       menubar = Menu(self.master)
       self.master.config(menu=menubar)
@@ -9064,9 +8991,6 @@ class GuiMaker(Frame):   # Inherit from Tk frame
          pulldown = Menu(menubar)
          self.addMenuItems(pulldown,items)
          menubar.add_cascade(label=name, underline=key, menu=pulldown)
-      pulldown = Menu(menubar)
-      pulldown.add_command(label="About" , command=self.help)
-      menubar.add_cascade(label="Help",menu=pulldown)
 
    def addMenuItems(self, menu, items):
       for item in items:
@@ -9074,33 +8998,173 @@ class GuiMaker(Frame):   # Inherit from Tk frame
             menu.add_separator({})
          else:
             menu.add_command(label = item[0], underline = item[1], command=item[2] )
-   def help(self):
-      from tkMessageBox import showinfo
-      showinfo("Help","Sorry, no help for " + self.__class__.__name__ + "\nPlease try harder")
 
 if __name__=="__main__":
-   menuBar = [
-    ( "File", 0,
-               [ ( "File", 0, lambda:0),
-                 ( "Quit", 0, sys.exit) ] ) ,
-    ( "Another Menu", 0, 
-               [ ( "Item", 0, lambda:0) ] ) ]
+
+   def help():
+      from tkMessageBox import showinfo
+      showinfo("Help","Sorry, no help for you!\nPlease try harder")
+   linarpcredits = open("linarp.credits","r").read() 
+   license = open("linarp.licences","r").read()
+
+   def credits():
+      from tkMessageBox import showinfo
+      showinfo("Credits",linarpcredits)
+
+
+   import tkFileDialog,os,guiimports
+
    class TestGuiMaker(GuiMaker):
       def start(self):
-         self.menuBar=menuBar
+          self.menuBar = [ ( "File", 0,
+                              [ ( "Open epf file", 5, self.openxye),
+                                ( "Open mca file", 5, self.openmca),
+                                ( "Open dils file", 5, self.opensrd),
+                                ( "Clear", 0, self.clear ),
+                                ( "Exit", 1, sys.exit) ] ) ,
+                           ( "Plotting", 0, 
+                              [ ( "Autoscale", 0, self.autoscaleplot) ] ) ,
+                           ( "Fitting", 2, 
+                              [ ( "Fit 1 peak", 4, self.fitpeak)  ,
+                                ( "Fit Solvent Scattering", 4, self.fitsolvent) ] ) ,
+                           ( "Help", 0, 
+                              [ ( "Help Me!", 0, help) ,
+                                ( "Credits" , 0, credits) ] ) ]
+      def clear(self):
+         self.plotitems=[]
+         self.updateplot()
+
+      def openxye(self):
+         fn=tkFileDialog.askopenfilename(initialdir=os.getcwd(), title="Name of EPF file please") 
+         self.plotitems.append(guiimports.epffile(fn))
+         self.updateplot()
+
+      def openmca(self):
+         fn=tkFileDialog.askopenfilename(initialdir=os.getcwd(), title="Name of MCA file please")
+         self.plotitems.append(guiimports.mcadata(fn))
+         self.updateplot()
+
+      def opensrd(self):
+         d=tkFileDialog.askopenfilename(initialdir=os.getcwd(), title="Name of DILS file please")
+         c=tkFileDialog.askopenfilename(initialdir=os.getcwd(), title="Name of CCL file please")
+         p=tkFileDialog.askopenfilename(initialdir=os.getcwd(), title="Name of PDB file please")
+         self.plotitems.append(guiimports.solventrefinedata(d,c,p))
+         self.updateplot()
+
+
+      def fitpeak(self):
+         data=self.plotitems[0]             # Active data set from tree
+         model=guiimports.profvalplusback() # Choose a peak shape here
+         r = self.twodplotter.a.get_xlim()
+         data.setrange(r)
+         optimiser=guiimports.densemodelfit(data=data,model=model)
+         optimiser.refine(ncycles=10)
+         d={"title" : "Calculated", "color" : "g"}
+         self.plotitems.append(guiimports.powderdata(data.x, model.ycalc, None, d))
+         d={"title" : "Difference", "color" : "r"}
+         self.plotitems.append(guiimports.powderdata(data.x, model.ycalc - data.y, None, d))        
+         data.setrange(None)
+         self.updateplot()
+
+      def fitsolvent(self):
+         data=self.plotitems[0]             # Active data set from tree
+         r = self.twodplotter.a.get_xlim()
+         data.setrange(r)
+         calc=sum(data.fsq)
+         obs= sum(data.ciiobject.Ihkl)
+         s = obs/calc
+         model=guiimports.solventmodel(Asolv=0.8, Bsolv=20, scale=s)    # Choose a peak shape here
+         optimiser=guiimports.densemodelfit(data=data,model=model,marq=2)
+         optimiser.refine(ncycles=10)
+         d={"title" : "Calculated", "color" : "g"}
+         self.plotitems.append(guiimports.powderdata(data.x, model.ycalc, None, d))
+         d={"title" : "Difference", "color" : "r"}
+         self.plotitems.append(guiimports.powderdata(data.x, model.ycalc - data.y, None, d))        
+         data.setrange(None)
+         self.updateplot()
+
+
+      def updateplot(self):
+         self.twodplotter.plotitems=self.plotitems
+         self.twodplotter.replot()
+  
+      def autoscaleplot(self):
+         self.twodplotter.autoscale()
+
       def makeWidgets(self):
-         import maketree, guiimports
-         f=maketree.ScrolledCanvas(self)
+         import maketree, inspect, Pmw
+         # Get size of TopLevels window
+         self.pw=Pmw.PanedWidget(self,orient='horizontal',
+                               hull_borderwidth = 1,
+                               hull_relief = 'sunken',
+                               hull_width=int(0.8*self.winfo_screenwidth()),
+                               hull_height=int(0.8*self.winfo_screenheight()) )
+         treepane=self.pw.add("Tree",min=0.1,max=0.9, size=0.25)
+         f=maketree.ScrolledCanvas(treepane)
          f.canvas.config(bg='white')
-         f.frame.pack(side=BOTTOM,expand=1,fill=BOTH)
-         item = maketree.linarptreeitem( ("guiimports",guiimports) )
-         node = maketree.TreeNode(f.canvas, None, item)
+         f.frame.pack(side=LEFT,expand=1,fill=BOTH)
+         l=[("Linarp",()), inspect.getclasstree( 
+               [ i[1]  for  i  in 
+                inspect.getmembers(guiimports, inspect.isclass ) ] ) ]
+         # Sorry, taking the piss a bit there, what I mean is:
+         #    l = [ i[1]  for  i  in  inspect.getmembers(guiimports, inspect.isclass ) ]
+         #    l=inspect.getclasstree(l)
+         #    l=[ ("linarp",()) ,l]
+         item = maketree.linarptreeitem(l)
+         node=maketree.TreeNode(f.canvas, None, item)
          node.update()
          node.expand()
+         plotpane=self.pw.add("Plot",min=0.1,max=0.9,size=0.75)
+         import twodplot
+         self.twodplotter=twodplot.twodplot(plotpane)
+         self.twodplotter.pack(side=RIGHT, expand=1, fill=BOTH)
+         self.pw.pack(expand=1,fill=BOTH) 
+        
    root = Tk()
+   root.wm_title("Linarp Is Not A Rietveld Program")
    TestGuiMaker()
    root.mainloop()
 @}
+
+
+\subsection{Trees and tree viewers}
+
+A tree view widget gives a fairly logical way to draw most objects
+on the screen. Plotting  is then a question of selecting the
+x and y arrays from the selection of created objects.
+
+@o guiimports.py
+@{
+""" A list of the things which should be drawable """
+
+# Possible PowderPattern objects
+from powderdata import powderdata
+from epffile import epffile
+from mcadata import mcadata
+from powbase import powbase
+
+# Possible Intensity Objects
+#import shelx
+from ciidata import ciidata
+from solventrefinedata import solventrefinedata
+
+# Models
+from solventmodel import solventmodel
+from profvalplusback import profvalplusback
+
+# Possible Fitting Objects
+from densemodelfit import densemodelfit
+
+@}
+
+So the gui starts up, reads the list of guiobjects
+and offers to create any one of them. So it has a 
+"create new" menu item, an "exit" menu item and
+a help menu to explain that you need to create something. 
+Upon deciding to create something new, for example
+powderdata, the gui needs to know all the possible
+things which are possible.
+
 
 Now we will try to work out how to take the guiobjects file and turn the lists
 in there into gui functionality. The python "inspect" module will help to do that.
@@ -9110,23 +9174,33 @@ in there into gui functionality. The python "inspect" module will help to do tha
 
 import inspect, guiimports
 from idlelib.TreeWidget import TreeItem, TreeNode, ScrolledCanvas
-from types import ModuleType, ClassType
+from types import ModuleType, ClassType, ListType
 from Tkinter import Frame
 
 class linarptreeitem(TreeItem):
-   def __init__(self,arg):
-      self.name=arg[0]
-      self.object=arg[1]
+   def __init__(self,l,kids=None):
+      self.kids=[]
+      if type(l)==type([]):
+         self.item=l[0][0]
+         if type(l[1:][0])==type([]):
+            for item in l[1:][0]:
+               if type(item)!=type([1]):
+                  self.kids.append(item)
+               else:
+                  self.kids[-1]=[self.kids[-1],item]
+      else:
+         self.item=l[0]
    def GetText(self):
-      return self.name
+      return str(self.item).split(".")[-1]
    def IsExpandable(self):
-      return type(self.object) in [ModuleType]
+      return len(self.kids)>0
    def GetSubList(self):
-      l=inspect.getmembers(self.object, inspect.ismodule)
-      l.extend( inspect.getmembers(self.object, inspect.isclass))
-      return [linarptreeitem(i) for i in l ]
+      return [linarptreeitem(i) for i in self.kids] 
    def OnDoubleClick(self):
-      print "You just double clicked",self.name,self.object
+      print "Docs for that:",self.item,"\n",self.item.__doc__
+      if inspect.isclass(self.item):
+         print "Instructions for creation of a ",self.item.__module__
+         print self.item.__init__.__doc__
 
 if __name__=="__main__":
    from Tkinter import *
@@ -9135,7 +9209,10 @@ if __name__=="__main__":
    f=ScrolledCanvas(root)
    f.canvas.config(bg='white')
    f.frame.pack(side=BOTTOM,expand=1,fill=BOTH)
-   item = linarptreeitem( ("guiimports",guiimports) )
+   l = [ i[1]  for  i  in  inspect.getmembers(guiimports, inspect.isclass ) ]
+   l=inspect.getclasstree(l)
+   l=[ ("linarp",()) ,l]
+   item = linarptreeitem(l )
    node=TreeNode(f.canvas, None, item)
    node.update()
    node.expand()
@@ -9143,6 +9220,178 @@ if __name__=="__main__":
 
 
 @}
+
+
+After spending a very long time getting that little tree viewing thing to work,
+it seems a shame not to keep it. Looking at it the morning after, I 
+can't see what the fuss was about - just that recursion is sometimes a 
+painful thing to do when you don't know what you are doing! Probably it
+will crash and burn if we don't know what we are doing.
+
+An alternative method is to go via xml and particularly the "dom" or 
+document model object format. On the python cookbook site there is a 
+nice little recipe for displaying DOM trees. In the future (when
+a book arrives explaining a bit about XML and DOM etc) it is hoped
+that we will make an xml document and display that. For now, here is
+the dom tree viewer so I don't have to look for it again.
+
+@o domtree.py
+@{
+# domtree.py
+# This is a simple example for idlelib.TreeWidget
+
+# Written by Seo Sanghyeon
+# Put into the public domain
+
+from Tkinter import Tk, Canvas
+from xml.dom.minidom import parseString
+from idlelib.TreeWidget import TreeItem, TreeNode
+
+class DomTreeItem(TreeItem):
+    def __init__(self, node):
+        self.node = node
+    def GetText(self):
+        node = self.node
+        if node.nodeType == node.ELEMENT_NODE:
+            return node.nodeName
+        elif node.nodeType == node.TEXT_NODE:
+            return node.nodeValue
+    def IsExpandable(self):
+        node = self.node
+        return node.hasChildNodes()
+    def GetSubList(self):
+        parent = self.node
+        children = parent.childNodes
+        prelist = [DomTreeItem(node) for node in children]
+        itemlist = [item for item in prelist if item.GetText().strip()]
+        return itemlist
+
+data = '''
+<a>
+ <b>
+  <c>d</c>
+  <c>e</c>
+ </b>
+ <b>
+  <c>f</c>
+ </b>
+</a>
+'''
+if __name__=="__main__":
+   root = Tk()
+   canvas = Canvas(root)
+   canvas.config(bg='white')
+   canvas.pack()
+   dom = parseString(data)
+   item = DomTreeItem(dom.documentElement)
+   print dom,dom.documentElement
+   node = TreeNode(canvas, None, item)
+   node.update()
+
+   root.mainloop()
+
+@}
+
+\section{Creating new objects on the fly}
+
+In making the gui more independent of the rest of the code,
+it would be handy to have a wizard which can read in all 
+of the various file formats which will be needed to 
+get data into the program.
+
+The wizard should be sooo clever that it can pop up 
+a dialog to allow a user of the gui to create and
+interact with an object \emph{which did not exist at
+the time the gui was written}. 
+The limitation here is that the writer of the class
+must include a string \code{arglist=args} in the 
+docstring for the \code{__init__} method for the 
+class.
+The user can the be prompted for whatever is needed in creation. 
+Types of things become important now, and as python
+is not a typed language this is problematic.
+To get around this we will force certain naming conventions.
+
+Things which might be needed in object creation are
+filenames, data objects and model objects. Can we 
+assume the user has sufficient intelligence not
+to put an integrated intensity model with powder
+data? Doubtful. Probably the objects will need
+to check up on the "xunits" to get that part
+right.
+
+So we have a list of things which can be created - 
+from our tree extravaganza. So we have a create
+new function which takes a class as argument.
+It prompts the users for default values for each
+of the arguments and then applies the class.__init__
+method with the received arguments. Or by 
+not putting them in if we don't know what they are.
+
+@o objectcreator.py
+@{
+""" 
+Create new linarp objects based on the docstrings of
+the classes __init__ method.
+That means your __init__ MUST contain the right information
+"""
+
+import inspect 
+
+def objectcreator(klass):
+   print "Instantiating a",str(klass),"object. The instructions read:"
+   args=[]
+   print inspect.getargspec(klass.__init__)
+   for line in klass.__init__.__doc__.split("\n"):
+      print line
+      if line.find("arglist") >= 0:
+         args.extend(line.split("=")[1].split(","))
+   # Now we have a list of the arguments
+   print args
+   argdict={}
+   for arg in args:
+      value = raw_input("Please enter value for "+arg)
+      if value != "":
+         argdict[arg]=value
+   extra=raw_input("Send something unexpected called:")
+   while extra != "":
+      value=raw_input("Which has value")
+      argdict[extra]=value
+      extra=raw_input("Send something unexpected called:")
+   print argdict
+   return klass(argdict)
+      
+if __name__=="__main__":
+   class bob:
+      def __init__(self,jerry, laura, bob=1,*k,**key):
+         """
+         A linarp docstring
+         It must contain a line specifying the arguments
+         arglist = jerry, tim, laura, row, fun, inputfile, outputfile, splendiferous
+         and ideally some instructions about how to use them
+         """
+         self.kwds=key
+         print "First bit",k
+         print "Second bit",key
+      def printem(self):
+          for k in self.kwds.keys():
+             print k,"=>",self.kwds[k]
+   jack = objectcreator(bob)
+   print jack
+   jack.printem()
+@}
+
+
+\section{Scripting}
+
+The gui should be fully scriptable, so that any actions which are carried out
+are logged and can be reproduced in a simple way.
+With a few simple constructs this should give way to powerful treatments for
+series of files.
+Since the language is python, it ought to be possible to do this without too 
+much trouble.
+
+
 
 \chapter{Technicalities}
 
@@ -9343,7 +9592,16 @@ __asm__("clc \n\t"\
 */
 @}
 
+\section{Credits}
 
+Linarp builds on the work of many other people. These are some of them.
+
+@o linarp.credits
+@{Thanks to:
+ Larry Finger for peak function "profval"
+ Ralf Grosse Kunstleve for cctbx
+ John Hunter for matplotlib
+@}
 
 \section{License}
 
@@ -9391,7 +9649,7 @@ copyrighted by the following notice:
 I think that the main thing which is likely to come into 
 linarp from CCSL is contained the in the subroutine matdil.f (and
 it's friends) which was written entirely from scratch by the 
-author.
+author, so that copyright cannot really apply.
 
 It is the authors firm belief that scientific software is utterly
 useless unless you can find out \emph{exactly} how it works.
