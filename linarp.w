@@ -1171,18 +1171,522 @@ class pf_xtal(peak_array):
       
 @}
 
-\chapter{The correlated integrated intensity stuff from prodd}
+
+
+
+\chapter{Input data formats}
+
+Reading raw datafiles from the many varied instruments which exist
+is a cause for serious pain for anyone who has done a lot 
+of powder diffraction.
+We'll make a data object here which we hope will be general
+enough for whatever formats come along.
+For most people an array of ``x'' values combined with arrays
+of intensity and error bar are enough. 
+For some people, especially those using area detectors, we 
+might want to let the ``x'' array have more than one number 
+in it (position on detector and maybe sample setting angle).
+
+Other items which are needed about the experimental setup
+can all be stored in a dictionary. For example, wavelengths,
+monochromator angles, polarisation, temperature, pressure, phase
+of the moon, etc. 
+
+The generic data object holds an x array, a y array and and e array 
+and a dataitems dictionary. For a 2D image you can make the arrays 1D
+still, but put a stride in the dictionary. 
+Depends on personal taste I guess?
+
+@o powderdata.py
+@{
+""" Dataset object for powder data """
+@<pycopyright@>
+from Numeric import *
+class powderdata:
+   def __init__(self,x,y,e,d):
+      """ x = x values, y = y values, e = errors, d = dictionary """
+      self.x=self.xfull=x
+      self.y=self.yfull=y
+      self.e=self.efull=e
+      self.w=self.wfull=(1./(self.efull*self.efull)).astype(Float32)
+      self.d=d
+      self.npoints=self.x.shape[0]
+
+   def setrange(self,lh=None):
+      """ Set the active range """
+      if lh==None:
+         self.x=self.xfull
+         self.y=self.yfull
+         self.e=self.efull
+         self.w=self.wfull
+         self.d["active_range"]=None
+         self.npoints=self.x.shape[0]
+      else:
+         l=searchsorted(self.xfull,lh[0])
+         h=searchsorted(self.xfull,lh[1])
+         self.x=self.xfull[l:h]
+         self.y=self.yfull[l:h]
+         self.e=self.efull[l:h]
+         self.w=self.wfull[l:h]
+         self.d["active_range"]=lh
+         self.npoints=self.x.shape[0]
+  
+   def weightmatvec(self,vector):
+      """ 
+      Converts d{yalc}/d{parameter} into d{chi^2}/d{parameter} via 1/sigma^2
+      """
+      return vector*self.w
+@}
+
+The various dictionary items which you might need are defined here.
+Please add to this list in the future or make your file reader
+use the things in here already.
+Other parts of the code are going to rely on finding the information
+they need in this dictionary.
+
+\begin{itemize}
+\item wavelength - for constant wavelength data
+\item zero -  if there is a zero shift to add to x
+\item pathlength  - for ToF neutron data
+\item angle - for ToF neutron of energy dispersive x-ray
+\item polarisation - in range 0 to 1.
+\item temperature
+\item pressure
+\item time
+\item title
+\item formula
+\item radiation - x-ray, neutron, electron
+\item xunits - these determine CW versus ToF versus ED
+ \begin{itemize}
+  \item degrees - implies 2$\theta$, constant wavelength
+  \item keV - implies photon energy for energy dispersive
+  \item microseconds - implies neutron ToF
+ \end{itemize}
+\item yunits
+\item mur  - absorbtion coefficient (for cylinders)
+\item mut - absorption coefficient (for plates)
+\item comment - anything you like
+\item fromfile - where the data were read in from
+\item Some system for sample orientation angles - define please - FIXME
+\end{itemize}
+
+
+Finally - a handy little function for making filename from numbers
+and stems and dealing with multiple datasets:
+
+@d makename
+@{
+def makename(stem,num,extn,width=4):
+   """
+   Generates filenames "stem"+nnnn+"extn" 
+   eg: Bruker: sample101.0000 is "sample101."+0+"",width=4
+       edf   : sample0000.edf is "sample"+0+".edf",width=4
+       chi   : sample0000.chi is "sample"+0+".chi",width=4
+       inp   : 0.inp is ""+0+".inp",width=0
+   """
+   if width>0:
+      fs="%s%0"+"%d"%(width)+"d%s"
+   else:
+      fs="%s%d%s"
+   return fs%(stem,num,extn)
+@}
+
+\section{Reading epf files}
+
+At the esrf the usual dataformat for powders is just a list of 
+x y error values.
+We'll make a little object for reading the files.
+
+@o epffile.py
+@{
+""" Epf file reading object """
+@< pycopyright @>
+from powderdata import powderdata
+from Numeric import *
+class epffile(powderdata):
+   def __init__(self,filename,**kwargs):
+      """ Reads a filename and hopes to get wavelength etc as optional args """
+      x=[] ; y=[]; e=[]; d={}
+      d["fromfile"]=filename   # defaults
+      for line in open(filename).readlines():
+         xye=map(float,line.split())
+         x.append(xye[0])
+         y.append(xye[1])
+         e.append(xye[2])
+      d["xunits"]="2theta"
+      d["yunits"]="arbitrary"
+      for key,val in kwargs.items(): d[key]=val
+      powderdata.__init__(self,array(x),array(y),array(e),d)
+@}
+
+\section{Reading GSAS files}
+
+Something should go here for reading GSAS files
+
+\section{Reading powbase files}
+
+Something to read the powbase datafile format
+
+From http://www.cristal.org/powbase/add.html
+\begin{itemize}
+\item Comments beginning with ``\#'' or ``!''
+\item Three numbers which $2\theta$ start, step and end.
+\item Raw intensities in free format
+\end{itemize}
+
+@o powbase.py
+@{
+""" Powbase file reading object """
+@< pycopyright @>
+from powderdata import powderdata
+from Numeric import *
+class powbase(powderdata):
+   def __init__(self,filename,**kwargs):
+      y=[]; e=[]; d={}
+      d["fromfile"]=filename
+      low=None
+      for line in open(filename).readlines():
+         if line[0] in ["!","#"]:
+            if d.haskey("comment"):
+               d["comment"]="%s\n%s"%(d["comment"],line)
+            else:
+               d["comment"]=line
+         elif low==None:
+            # read tth low, step, high
+            [low,step,high]=map(float,line.split())
+            x=arange(low,high+step,step)
+         else:
+            vals=map(float,line.split())
+            for v in vals: y.append(v)
+      t=array(y,Float)
+      e=sqrt(y)
+      d["wavelength"]=1.54036
+      d["xunits"]="2theta"
+      d["yunits"]="Counts"
+      for key,val in kwargs.items(): d[key]=val
+      powderdata.__init__(self,array(x),array(y),array(e),d)
+@}
+
+\section{Reading MCA files}
+
+This is an ESRF spec format with an MCA data array.
+
+@o mcadata.py
+@{
+""" MCA esrf spec file reader """
+@< pycopyright @>
+from powderdata import powderdata
+from Numeric import *
+class mcadata(powderdata):
+   def __init__(self,filename,**kwargs):
+       y=[] ; e=[] ; d={}
+       d['fromfile']=filename 
+       on=0
+       for line in open(filename).readlines():
+          if on==1:
+             nums=map(int,(line.split("\\")[0]).split())
+             y.extend(nums)
+          if line[0]=="#":
+             d[line.split()[0]]=line
+          if line[0]=="@@":
+             on=1
+             l=line[2:].split("\\")[0]
+             nums=map(int,l.split() )
+             y.extend(nums)
+       x=array(range(len(y)))
+       y=array(y)
+       e=sqrt(y+0.5) # Bayesian 0.5 to avoid zero errorbars
+       powderdata.__init__(self,x,y,e,d)
+
+ 
+if __name__=="__main__":
+   import sys
+   obj=mcadata(sys.argv[1])
+   
+
+@}
+
+\section{Reading cif (data) files}
+
+Read in the powder data related parts of cif files.
+Other things (like crystal structures) to go elsewhere.
+
+\section{Reading 2 dimensional images}
+
+There are many possible image formats which we might eventually
+like to be able to read. For now something is included for a 
+Bruker Smart area detector and the ESRF EDF data file format.
+Neither of these decoders is a full implementation, but intended
+to be just enough for a quick fix for reading data for beamline
+ID11 at the ESRF.
+
+For most image reading applications we are supplied with an
+array dumped as a stream of bytes. Conversion into a python
+array of that stream of bytes is given by the function below.
+
+@d readbytestream
+@{
+def readbytestream(file,offset,x,y,nbytespp,datatype='int',signed='n',
+                   swap='n',typeout=UInt16):
+   """
+   Reads in a bytestream from a file (which may be a string indicating
+   a filename, or an already opened file (should be "rb"))
+   offset is the position (in bytes) where the pixel data start
+   nbytespp = number of bytes per pixel
+   type can be int or float (4 bytes pp) or double (8 bytes pp)
+   signed: normally signed data 'y', but 'n' to try to get back the right numbers
+     when unsigned data are converted to signed (python has no unsigned numeric types.)
+   swap, normally do not bother, but 'y' to swap bytes
+   typeout is the Numeric type to output, normally UInt16, but more if overflows occurred
+   x and y are the pixel dimensions
+   """
+   tin="dunno"
+   len=nbytespp*x*y # bytes per pixel times number of pixels
+   if datatype=='int' and signed=='n':
+      if nbytespp==1 : tin=UInt8
+      if nbytespp==2 : tin=UInt16
+      if nbytespp==4 : tin=UInt32
+   if datatype=='int' and signed=='y':
+      if nbytespp==1 : tin=Int8
+      if nbytespp==2 : tin=Int16
+      if nbytespp==4 : tin=Int32
+   if datatype=='float':
+      tin=Float32
+   if datatype=='double' :
+      tin=Float64
+   if tin=="dunno" :
+      raise SyntaxError, "Did not understand what type to try to read"
+   opened=0
+   if type(tin) == type(file):  # Did we get a string or a file pointer?
+      f=open(file,'rb')
+      opened=1
+   else:
+      f=file
+   f.seek(offset)
+   if swap=='y':
+      ar=array(reshape(byteswapped(fromstring(f.read(len),tin)),(x,y)),typeout)
+   else:   
+      ar=array(reshape(fromstring(f.read(len),tin),(x,y)),typeout)
+   if(opened):f.close()
+   return(ar)
+@}
+
+
+\subsection{Bruker area detector format}
+
+We begin with something to read in the header section of the file:
+
+@d readbrukerheader
+@{
+def readbrukerheader(file):
+   """
+   Reads a Bruker file header into a Python dictionary
+   file=filename or file pointer
+   """
+   s="string"                 # s is a string
+   if type(s) == type(file):  # if arg is a string, open file, else treat as file object
+      f=open(file,"rb")
+      opened=1
+   else:
+      f=file
+      opened=0                # opened var flags to close again if we open the file
+   i=80
+   block=f.read(512)          # always start with a 512 byte header
+   Header={}                  # dict to take results
+   while i < 512 :            # wander along the 512 bytes
+      key,val=block[i-80:i].split(":",1)   # uses 80 char lines in key : value format
+      key=key.strip()         # remove the whitespace (why?)
+      val=val.strip()
+      if Header.has_key(key):             # append lines if key already there
+         Header[key]=Header[key]+'\n'+val
+      else:
+         Header[key]=val
+      i=i+80                  # next 80 characters
+   nhdrblks=int(Header['HDRBLKS'])    # we must have read this in the first 512 bytes.
+   # print "got first chunk, headerblocks is",nhdrblks
+   # Now read in the rest of the header blocks, appending to what we have
+   block = block[i-80:512] + f.read(512*(nhdrblks-1))
+   j=512*nhdrblks
+   while i < j :
+      # print i,"*",block[i-80:i].strip(),"*"
+      if block[i-80:i].find(":") > 0:          # as for first 512 bytes of header
+         key,val=block[i-80:i].split(":",1)    
+         key=key.strip()
+         val=val.strip()
+         if Header.has_key(key):
+            Header[key]=Header[key]+'\n'+val
+         else:
+            Header[key]=val
+      i=i+80
+   Header['datastart']=f.tell()                # make a header item called "datastart"
+   if(opened):f.close()
+   return Header     # s
+@}
+
+And now the bulk of the data - doing something about the overlaps at the end
+of the file.
+
+@d readbruker
+@{
+@< readbrukerheader @>
+
+def readbruker(file):
+   """
+   Reads in a Bruker file, returning the data and header
+   file may be a string or file object
+   FIXME we should later modify to take ROI ranges somehow (xmin,xmax,ymin,ymax)
+   """
+   s="string"                 # s is a string
+   if type(s) == type(file):  # if arg is a string, open file, else treat as file object
+      f=open(file,"rb")
+      opened=1
+   else:
+      f=file
+      opened=0       
+   Header=readbrukerheader(f) # pass in the file pointer, it stays open
+   npixelb=int(Header['NPIXELB'])   # you had to read the Bruker docs to know this!
+   rows   =int(Header['NROWS'])
+   cols   =int(Header['NCOLS'])
+   # We are now at the start of the image - assuming readbrukerheader worked
+   size=rows*cols*npixelb
+   data=readbytestream(f,f.tell(),rows,cols,npixelb,datatype="int",signed='n',swap='n')
+   no=int(Header['NOVERFL'])        # now process the overflows
+   if no>0:   # Read in the overflows
+       # need at least Int32 sized data I guess - can reach 2^21
+       data=data.astype(UInt32)
+       # 16 character overflows, 9 characters of intensity, 7 character position
+       for i in range(no):
+          ov=f.read(16)
+          intensity=int(ov[0:9])
+          position=int(ov[9:16])
+          r=position%rows           # relies on python style modulo being always +
+          c=position/rows           # relies on truncation down
+          #print "Overflow ",r,c,intensity,position,data[r,c],data[c,r]
+          data[c,r]=intensity
+   f.close()
+   Header["rows"]=rows
+   Header["columns"]=cols
+   return Header,data
+@}
+
+
+A little script to test out our bruker reading capabilities...
+
+@o testbruker.py
+@{
+from Numeric import *
+
+import imagereaders
+
+if __name__ == "__main__":
+   import sys
+   if len(sys.argv) < 2:
+      print "Usage: ",sys.argv[0]," filename"
+      sys.exit()
+   file=sys.argv[1]
+   h,d=readbruker(file)  # the command to get the file read in
+   for k,v in h.items(): # print out the header info
+     print k,":",v
+   print "Data shape:",d.shape # image shape
+   print "Data max, min, sum:",maximum.reduce(ravel(d)),   \
+                              minimum.reduce(ravel(d)),   \
+                              add.reduce(ravel(d))
+@}
+
+
+This covers the basics of reading Bruker files. They are going to come
+back as Unsigned Integer 8, 16 or 32 bit types. Optimisations to only
+read in certain parts of the image for doing faster computations
+of rocking curves might be nice, but that doesn't seem so important.
+The work involved in doing it seems a waste of time, as if you are
+going to be there looking for a peak to do a rocking curve of, you've
+already read the entire image in to choose it. Only really worthwhile
+for 8mb images. FIXME (do this getroi crap sometime for readbytestream)
+
+
+\subsection{Read ESRF edf files}
+
+We implement a very brief edf file reader here. The format is actually
+more extensive - you can place multiple images in one file etc. \emph{However}
+for reasons which are best not discussed this reader is only expected to
+work for images created, incorrectly, at beamline ID11. There is a spare
+pixel, which means you have to read back from the end of the files. Please
+don't ask!
+
+@d readid11edf
+@{
+def readid11edf(filename):
+   f=open(filename,"rb")
+   # Header is 1024 byte blocks, terminated by "}"
+   fh=f.read(1024)
+   i=1023
+   while fh[-2:]!="}\n": 
+      fh+=f.read(1024)
+   # Interpret header
+   headeritems=fh[1:-1].split(";")
+   hd={}
+   for item in headeritems: 
+      if item.find("=")>0:
+         hd[item.split("=")[0].lstrip().rstrip()]=item.split("=")[1].lstrip().rstrip()
+   hd["rows"]=int(hd["Dim_1"])
+   hd["columns"]=int(hd["Dim_2"])
+   f.seek(-int(hd["Size"]),2) # go to position offset from end
+                              # assumes last byte is last pixel (first is occasionally not!)
+   datastring=f.read(int(hd["Size"]))
+   f.close()
+   # Convert datastring to Numeric array
+   if hd["DataType"]=="UnsignedShort": numerictype=UInt16
+   else: 
+      raise TypeError("Unimplemented edf filetype")
+   if hd["ByteOrder"]=="LowByteFirst": 
+      ar=reshape(
+            fromstring(datastring,numerictype),
+            (hd["rows"],hd["columns"]) )
+   else:
+      ar=reshape(
+            fromstring(datastring,numerictype).byteswapped(),
+            (hd["rows"],hd["columns"]) )
+   return hd,ar
+@}
+
+\subsection{Reading image files}
+
+Putting together the bruker and edf readers we have:
+
+@o imagereaders.py
+@{
+""" 
+Image reading functions. They return a numeric array representing
+the image and a dictionary of thing which were found in headers
+"""
+    
+@< pycopyright @>
+
+from Numeric import *
+
+@< makename @>
+@< readbytestream @>
+@< readbruker @>
+@< readid11edf @>
+@}
+
+
+
+\section{The correlated integrated intensity stuff from prodd}
 
 
 A python object which can read in the sparse matrix structure
-coming from prodd and do something useful with it.
+coming from prodd and do something useful with it. Eventually we need
+to support the same kinds of interfaces as the powderdata object
+for things like plotting but probably some extra stuff like
+finding out what the hkls of the peaks are.
 
-
-\section{The fortran code from prodd}
 
 \section{The Fortran Library}
 
-The fortran version of Cholesky decomposition is: 
+The fortran version of Cholesky decomposition is as follows. This
+fortran was originally implmented in the prodd computer program
+for carrynig out large scale intensity extractions.
 
 @D fchol
 @{
@@ -1648,6 +2152,9 @@ with the matrix.
 
 @O cii.py
 @{
+
+@< pycopyright @>
+
 import Numeric,math,sys
 import pylibchol
 
@@ -1802,494 +2309,96 @@ if __name__=="__main__":
    sys.exit()
 @}
 
+\subsection{An optimisation object for correlated integrated intensities}
 
-\chapter{Input data formats}
+For refinement and plotting we only need to support the interface defined
+by the powderdata object. Thus far that is only to contain x and y arrays 
+used for plotting, a setrange function to decide what data to use, and 
+a weightmatvec function for optmisation.
 
-Reading raw datafiles from the many varied instruments which exist
-is a cause for serious pain for anyone who has done a lot 
-of powder diffraction.
-We'll make a data object here which we hope will be general
-enough for whatever formats come along.
-For most people an array of ``x'' values combined with arrays
-of intensity and error bar are enough. 
-For some people, especially those using area detectors, we 
-might want to let the ``x'' array have more than one number 
-in it (position on detector and maybe sample setting angle).
+For computing models based on a set of correlated integrated intensities
+we might need some extra functionality, which will be added here as needed.
 
-Other items which are needed about the experimental setup
-can all be stored in a dictionary. For example, wavelengths,
-monochromator angles, polarisation, temperature, pressure, phase
-of the moon, etc. 
-
-The generic data object holds an x array, a y array and and e array 
-and a dataitems dictionary. For a 2D image you can make the arrays 1D
-still, but put a stride in the dictionary. 
-Depends on personal taste I guess?
-
-@o powderdata.py
+@o ciidata.py
 @{
-""" Dataset object for powder data """
-@<pycopyright@>
-from Numeric import *
-class powderdata:
-   def __init__(self,x,y,e,d):
-      """ x = x values, y = y values, e = errors, d = dictionary """
-      self.x=self.xfull=x
-      self.y=self.yfull=y
-      self.e=self.efull=e
-      self.d=d
-      self.npoints=self.x.shape[0]
+""" Correlated integrated intensity object for use in refinement """
+@< pycopyright @>
 
-   def setrange(self,lh=None):
-      """ Set the active range """
-      if lh==None:
+from Numeric import *
+import cii,pylibchol
+
+class ciidata:
+   def __init__(self,ciiobject ,d):
+      self.ciiobject=ciiobject   # A cii object as above
+      self.d=d                   # Holds metadata in dictionary
+      self.x=self.xfull=array(range(self.ciiobject.ni)) 
+                     # default to number of integrated intensities
+      self.y=self.yfull=self.ciiobject.Ihkl
+      self.npoints=self.ciiobject.ni
+      try: 
+        self.rcm = d['rcm']
+      except KeyError:
+        print "No unit cell supplied for your data"
+      self.lh=None
+   def setrange(self,lh=None): 
+      self.lh=lh
+      if self.lh==None:
          self.x=self.xfull
          self.y=self.yfull
-         self.e=self.efull
-         self.d["active_range"]=None
          self.npoints=self.x.shape[0]
-      else:
-         l=searchsorted(self.x,lh[0])
-         h=searchsorted(self.x,lh[1])
+      else:         
+         l=0 # always - not sure how to throw out low angle peaks yet
+         h=searchsorted(self.xfull,self.lh[1])
          self.x=self.xfull[l:h]
          self.y=self.yfull[l:h]
-         self.e=self.efull[l:h]
-         self.d["active_range"]=lh
+         self.d["active_range"]=[l,h]
+         self.lh=[l,h]  
          self.npoints=self.x.shape[0]
+   def weightmatvec(self,vector):
+      v=vector.astype(Float32)
+      return pylibchol.fmatvec(self.ciiobject.matrix,self.ciiobject.IP,v,self.npoints)
+   def sinthetaoverlambda2(self,i):
+      hkl=self.ciiobject.HKL[i]
+      return dot(hkl,matrixmultiply(self.d['rcm'],hkl))
+   def setfsq(self,fsq):
+      self.fsq=fsq # holds list of computed structure factors if available
+
 @}
+  
 
-The various dictionary items which you might need are defined here.
-Please add to this list in the future or make your file reader
-use the things in here already.
-Other parts of the code are going to rely on finding the information
-they need in this dictionary.
+Now for something useful - we want to refine solvent scattering (later on)
+and need to read a dils file from prodd, a ccl file to get the cell parameters
+and a pdbfile to get the structure factors.
 
-\begin{itemize}
-\item wavelength - for constant wavelength data
-\item zero -  if there is a zero shift to add to x
-\item pathlength  - for ToF neutron data
-\item angle - for ToF neutron of energy dispersive x-ray
-\item polarisation - in range 0 to 1.
-\item temperature
-\item pressure
-\item time
-\item title
-\item formula
-\item radiation - x-ray, neutron, electron
-\item xunits - these determine CW versus ToF versus ED
- \begin{itemize}
-  \item degrees - implies 2$\theta$, constant wavelength
-  \item keV - implies photon energy for energy dispersive
-  \item microseconds - implies neutron ToF
- \end{itemize}
-\item yunits
-\item mur  - absorbtion coefficient (for cylinders)
-\item mut - absorption coefficient (for plates)
-\item comment - anything you like
-\item fromfile - where the data were read in from
-\item Some system for sample orientation angles - define please - FIXME
-\end{itemize}
-
-
-Finally - a handy little function for making filename from numbers
-and stems and dealing with multiple datasets:
-
-@d makename
+@o solventrefinedata.py
 @{
-def makename(stem,num,extn,width=4):
-   """
-   Generates filenames "stem"+nnnn+"extn" 
-   eg: Bruker: sample101.0000 is "sample101."+0+"",width=4
-       edf   : sample0000.edf is "sample"+0+".edf",width=4
-       chi   : sample0000.chi is "sample"+0+".chi",width=4
-       inp   : 0.inp is ""+0+".inp",width=0
-   """
-   if width>0:
-      fs="%s%0"+"%d"%(width)+"d%s"
-   else:
-      fs="%s%d%s"
-   return fs%(stem,num,extn)
-@}
-
-\section{Reading epf files}
-
-At the esrf the usual dataformat for powders is just a list of 
-x y error values.
-We'll make a little object for reading the files.
-
-@o epffile.py
-@{
-""" Epf file reading object """
+""" Data for refining a bulk solvent model """
 @< pycopyright @>
-from powderdata import powderdata
 from Numeric import *
-class epffile(powderdata):
-   def __init__(self,filename,**kwargs):
-      """ Reads a filename and hopes to get wavelength etc as optional args """
-      x=[] ; y=[]; e=[]; d={}
-      d["fromfile"]=filename   # defaults
-      for line in open(filename).readlines():
-         xye=map(float,line.split())
-         x.append(xye[0])
-         y.append(xye[1])
-         e.append(xye[2])
-      d["xunits"]="2theta"
-      d["yunits"]="arbitrary"
-      for key,val in kwargs.items(): d[key]=val
-      powderdata.__init__(self,array(x),array(y),array(e),d)
+import ciidata,cii
+from math import cos,pi
+from LinearAlgebra import inverse   
+import cctbxfcalc  # For a set of fcalc numbers
+
+class solventrefinedata(ciidata.ciidata):
+   def __init__(self,dilsfile, cclfile, pdbfile):
+      ciiobj = cii.ciimatrix(dilsfile)
+      fcalc = cctbxfcalc.getfcalcfrompdb(pdbfile,ciiobj.HKL.astype(Int).tolist())
+      fsq=abs(fcalc).astype(Float32)
+      fsq=fsq*fsq*1e-6
+      d={}
+      c=open(cclfile,"r").readlines()
+      for line in c:
+         if line[0]=="C":
+            [a,b,c,alpha,beta,gamma]=map(float,line[1:].split())
+      d['rm'] = array( [ [ a*a, a*b*cos(gamma*pi/180) , a*c*cos(beta *pi/180) ] ,
+                         [ a*b*cos(gamma*pi/180) , b*b, b*c*cos(alpha*pi/180) ] ,
+                         [ a*c*cos(beta *pi/180) , b*c*cos(alpha*pi/180) , c*c] ] )
+      d['rcm']= inverse(d['rm'])
+      ciidata.ciidata.__init__(self,ciiobj ,d)
+      self.setfsq(fsq)
+      
 @}
-
-\section{Reading GSAS files}
-
-Something should go here for reading GSAS files
-
-\section{Reading powbase files}
-
-Something to read the powbase datafile format
-
-From http://www.cristal.org/powbase/add.html
-\begin{itemize}
-\item Comments beginning with ``\#'' or ``!''
-\item Three numbers which $2\theta$ start, step and end.
-\item Raw intensities in free format
-\end{itemize}
-
-@o powbase.py
-@{
-""" Powbase file reading object """
-@< pycopyright @>
-from powderdata import powderdata
-from Numeric import *
-class powbase(powderdata):
-   def __init__(self,filename,**kwargs):
-      y=[]; e=[]; d={}
-      d["fromfile"]=filename
-      low=None
-      for line in open(filename).readlines():
-         if line[0] in ["!","#"]:
-            if d.haskey("comment"):
-               d["comment"]="%s\n%s"%(d["comment"],line)
-            else:
-               d["comment"]=line
-         elif low==None:
-            # read tth low, step, high
-            [low,step,high]=map(float,line.split())
-            x=arange(low,high+step,step)
-         else:
-            vals=map(float,line.split())
-            for v in vals: y.append(v)
-      t=array(y,Float)
-      e=sqrt(y)
-      d["wavelength"]=1.54036
-      d["xunits"]="2theta"
-      d["yunits"]="Counts"
-      for key,val in kwargs.items(): d[key]=val
-      powderdata.__init__(self,array(x),array(y),array(e),d)
-@}
-
-\section{Reading MCA files}
-
-This is an ESRF spec format with an MCA data array.
-
-@o mcadata.py
-@{
-""" MCA esrf spec file reader """
-@< pycopyright @>
-from powderdata import powderdata
-from Numeric import *
-class mcadata(powderdata):
-   def __init__(self,filename,**kwargs):
-       y=[] ; e=[] ; d={}
-       d['fromfile']=filename 
-       on=0
-       for line in open(filename).readlines():
-          if on==1:
-             nums=map(int,(line.split("\\")[0]).split())
-             y.extend(nums)
-          if line[0]=="#":
-             d[line.split()[0]]=line
-          if line[0]=="@@":
-             on=1
-             l=line[2:].split("\\")[0]
-             nums=map(int,l.split() )
-             y.extend(nums)
-       x=array(range(len(y)))
-       y=array(y)
-       e=sqrt(y+0.5) # Bayesian 0.5 to avoid zero errorbars
-       powderdata.__init__(self,x,y,e,d)
-
- 
-if __name__=="__main__":
-   import sys
-   obj=mcadata(sys.argv[1])
-   
-
-@}
-
-\section{Reading cif (data) files}
-
-Read in the powder data related parts of cif files.
-Other things (like crystal structures) to go elsewhere.
-
-\section{Reading 2 dimensional images}
-
-There are many possible image formats which we might eventually
-like to be able to read. For now something is included for a 
-Bruker Smart area detector and the ESRF EDF data file format.
-Neither of these decoders is a full implementation, but intended
-to be just enough for a quick fix for reading data for beamline
-ID11 at the ESRF.
-
-For most image reading applications we are supplied with an
-array dumped as a stream of bytes. Conversion into a python
-array of that stream of bytes is given by the function below.
-
-@d readbytestream
-@{
-def readbytestream(file,offset,x,y,nbytespp,datatype='int',signed='n',
-                   swap='n',typeout=UInt16):
-   """
-   Reads in a bytestream from a file (which may be a string indicating
-   a filename, or an already opened file (should be "rb"))
-   offset is the position (in bytes) where the pixel data start
-   nbytespp = number of bytes per pixel
-   type can be int or float (4 bytes pp) or double (8 bytes pp)
-   signed: normally signed data 'y', but 'n' to try to get back the right numbers
-     when unsigned data are converted to signed (python has no unsigned numeric types.)
-   swap, normally do not bother, but 'y' to swap bytes
-   typeout is the Numeric type to output, normally UInt16, but more if overflows occurred
-   x and y are the pixel dimensions
-   """
-   tin="dunno"
-   len=nbytespp*x*y # bytes per pixel times number of pixels
-   if datatype=='int' and signed=='n':
-      if nbytespp==1 : tin=UInt8
-      if nbytespp==2 : tin=UInt16
-      if nbytespp==4 : tin=UInt32
-   if datatype=='int' and signed=='y':
-      if nbytespp==1 : tin=Int8
-      if nbytespp==2 : tin=Int16
-      if nbytespp==4 : tin=Int32
-   if datatype=='float':
-      tin=Float32
-   if datatype=='double' :
-      tin=Float64
-   if tin=="dunno" :
-      raise SyntaxError, "Did not understand what type to try to read"
-   opened=0
-   if type(tin) == type(file):  # Did we get a string or a file pointer?
-      f=open(file,'rb')
-      opened=1
-   else:
-      f=file
-   f.seek(offset)
-   if swap=='y':
-      ar=array(reshape(byteswapped(fromstring(f.read(len),tin)),(x,y)),typeout)
-   else:   
-      ar=array(reshape(fromstring(f.read(len),tin),(x,y)),typeout)
-   if(opened):f.close()
-   return(ar)
-@}
-
-
-\subsection{Bruker area detector format}
-
-We begin with something to read in the header section of the file:
-
-@d readbrukerheader
-@{
-def readbrukerheader(file):
-   """
-   Reads a Bruker file header into a Python dictionary
-   file=filename or file pointer
-   """
-   s="string"                 # s is a string
-   if type(s) == type(file):  # if arg is a string, open file, else treat as file object
-      f=open(file,"rb")
-      opened=1
-   else:
-      f=file
-      opened=0                # opened var flags to close again if we open the file
-   i=80
-   block=f.read(512)          # always start with a 512 byte header
-   Header={}                  # dict to take results
-   while i < 512 :            # wander along the 512 bytes
-      key,val=block[i-80:i].split(":",1)   # uses 80 char lines in key : value format
-      key=key.strip()         # remove the whitespace (why?)
-      val=val.strip()
-      if Header.has_key(key):             # append lines if key already there
-         Header[key]=Header[key]+'\n'+val
-      else:
-         Header[key]=val
-      i=i+80                  # next 80 characters
-   nhdrblks=int(Header['HDRBLKS'])    # we must have read this in the first 512 bytes.
-   # print "got first chunk, headerblocks is",nhdrblks
-   # Now read in the rest of the header blocks, appending to what we have
-   block = block[i-80:512] + f.read(512*(nhdrblks-1))
-   j=512*nhdrblks
-   while i < j :
-      # print i,"*",block[i-80:i].strip(),"*"
-      if block[i-80:i].find(":") > 0:          # as for first 512 bytes of header
-         key,val=block[i-80:i].split(":",1)    
-         key=key.strip()
-         val=val.strip()
-         if Header.has_key(key):
-            Header[key]=Header[key]+'\n'+val
-         else:
-            Header[key]=val
-      i=i+80
-   Header['datastart']=f.tell()                # make a header item called "datastart"
-   if(opened):f.close()
-   return Header     # s
-@}
-
-And now the bulk of the data - doing something about the overlaps at the end
-of the file.
-
-@d readbruker
-@{
-@< readbrukerheader @>
-
-def readbruker(file):
-   """
-   Reads in a Bruker file, returning the data and header
-   file may be a string or file object
-   FIXME we should later modify to take ROI ranges somehow (xmin,xmax,ymin,ymax)
-   """
-   s="string"                 # s is a string
-   if type(s) == type(file):  # if arg is a string, open file, else treat as file object
-      f=open(file,"rb")
-      opened=1
-   else:
-      f=file
-      opened=0       
-   Header=readbrukerheader(f) # pass in the file pointer, it stays open
-   npixelb=int(Header['NPIXELB'])   # you had to read the Bruker docs to know this!
-   rows   =int(Header['NROWS'])
-   cols   =int(Header['NCOLS'])
-   # We are now at the start of the image - assuming readbrukerheader worked
-   size=rows*cols*npixelb
-   data=readbytestream(f,f.tell(),rows,cols,npixelb,datatype="int",signed='n',swap='n')
-   no=int(Header['NOVERFL'])        # now process the overflows
-   if no>0:   # Read in the overflows
-       # need at least Int32 sized data I guess - can reach 2^21
-       data=data.astype(UInt32)
-       # 16 character overflows, 9 characters of intensity, 7 character position
-       for i in range(no):
-          ov=f.read(16)
-          intensity=int(ov[0:9])
-          position=int(ov[9:16])
-          r=position%rows           # relies on python style modulo being always +
-          c=position/rows           # relies on truncation down
-          #print "Overflow ",r,c,intensity,position,data[r,c],data[c,r]
-          data[c,r]=intensity
-   f.close()
-   Header["rows"]=rows
-   Header["columns"]=cols
-   return Header,data
-@}
-
-
-A little script to test out our bruker reading capabilities...
-
-@o testbruker.py
-@{
-from Numeric import *
-
-import imagereaders
-
-if __name__ == "__main__":
-   import sys
-   if len(sys.argv) < 2:
-      print "Usage: ",sys.argv[0]," filename"
-      sys.exit()
-   file=sys.argv[1]
-   h,d=readbruker(file)  # the command to get the file read in
-   for k,v in h.items(): # print out the header info
-     print k,":",v
-   print "Data shape:",d.shape # image shape
-   print "Data max, min, sum:",maximum.reduce(ravel(d)),   \
-                              minimum.reduce(ravel(d)),   \
-                              add.reduce(ravel(d))
-@}
-
-
-This covers the basics of reading Bruker files. They are going to come
-back as Unsigned Integer 8, 16 or 32 bit types. Optimisations to only
-read in certain parts of the image for doing faster computations
-of rocking curves might be nice, but that doesn't seem so important.
-The work involved in doing it seems a waste of time, as if you are
-going to be there looking for a peak to do a rocking curve of, you've
-already read the entire image in to choose it. Only really worthwhile
-for 8mb images. FIXME (do this getroi crap sometime for readbytestream)
-
-
-\subsection{Read ESRF edf files}
-
-We implement a very brief edf file reader here. The format is actually
-more extensive - you can place multiple images in one file etc. \emph{However}
-for reasons which are best not discussed this reader is only expected to
-work for images created, incorrectly, at beamline ID11. There is a spare
-pixel, which means you have to read back from the end of the files. Please
-don't ask!
-
-@d readid11edf
-@{
-def readid11edf(filename):
-   f=open(filename,"rb")
-   # Header is 1024 byte blocks, terminated by "}"
-   fh=f.read(1024)
-   i=1023
-   while fh[-2:]!="}\n": 
-      fh+=f.read(1024)
-   # Interpret header
-   headeritems=fh[1:-1].split(";")
-   hd={}
-   for item in headeritems: 
-      if item.find("=")>0:
-         hd[item.split("=")[0].lstrip().rstrip()]=item.split("=")[1].lstrip().rstrip()
-   hd["rows"]=int(hd["Dim_1"])
-   hd["columns"]=int(hd["Dim_2"])
-   f.seek(-int(hd["Size"]),2) # go to position offset from end
-                              # assumes last byte is last pixel (first is occasionally not!)
-   datastring=f.read(int(hd["Size"]))
-   f.close()
-   # Convert datastring to Numeric array
-   if hd["DataType"]=="UnsignedShort": numerictype=UInt16
-   else: 
-      raise TypeError("Unimplemented edf filetype")
-   if hd["ByteOrder"]=="LowByteFirst": 
-      ar=reshape(
-            fromstring(datastring,numerictype),
-            (hd["rows"],hd["columns"]) )
-   else:
-      ar=reshape(
-            fromstring(datastring,numerictype).byteswapped(),
-            (hd["rows"],hd["columns"]) )
-   return hd,ar
-@}
-
-\subsection{Reading image files}
-
-Putting together the bruker and edf readers we have:
-
-@o imagereaders.py
-@{
-""" 
-Image reading functions. They return a numeric array representing
-the image and a dictionary of thing which were found in headers
-"""
-    
-@< pycopyright @>
-
-from Numeric import *
-
-@< makename @>
-@< readbytestream @>
-@< readbruker @>
-@< readid11edf @>
-@}
-
 
 
 \chapter{Building models}
@@ -2500,24 +2609,32 @@ earlier on and avoid rounding errors).
 
 
 
-\section{Dense gradients, 1D weight matrix}
+\section{Dense gradients, 1D or 2D weight matrix}
 
-This is the example in the design section.
-A fortran routine which can implement dense gradients and a dense
-matrix would sensibly store the matrix as triangular and use 
-symmetry when filling it in and inverting it.  
+This started as the example in the design section, with plans for
+a fortran routine which worried about the matrix being symmetric
+and triangular.
 
-Using the model class from the model section, dense gradients just implies
-that the derivative list will always be full. 
+After some fooling around fitting peaks to 1D datasets this
+ends up being an optimiser when all gradients are present
+at the same time for all data points (ie the scratch file
+in prodd)
 
-@o fitdensemodels1d.py
+This merges in the planned 2D weight matrix optmiser by calling on 
+the data object to possess a member function which offers
+a weighted-matrix-vector product. For the 1D stuff that it is 
+trivial, and in some ways more convenient to move the treatment
+of statistical weights into the data object.
+
+
+@o densemodelfit.py
 @{
 """ Least squares optimisation for dense models and 1D weights """
 @< pycopyright @>
 import time
 from Numeric import *
 from LinearAlgebra import generalized_inverse
-class fitdensemodels1d:
+class densemodelfit:
    def __init__(self,model=None,data=None,marq=None):
       """
       Optimises a model against a set of data
@@ -2554,11 +2671,19 @@ class fitdensemodels1d:
       while self.icyc < end: 
          self.model.compute(self.data)   # model only knows about data when computing
          obsminuscalc=self.data.y-self.model.ycalc
+# 1D         ge=zeros((self.data.npoints,self.nv),Float32)               # gradient array
+# 1D        for i in range(self.nv):
+# 1D              ge[:,i] = (self.model.gradient(self.variables[i]) / self.data.e).astype(Float32)
+# 1D        self.lsqmat=matrixmultiply(transpose(ge),ge)
+# 1D        self.rhs=matrixmultiply(obsminuscalc/self.data.e,ge)
          g=zeros((self.data.npoints,self.nv),Float32)               # gradient array
+         for i in range(self.nv):                        # avoid this somehow?
+            g[:,i] = self.model.gradient(self.variables[i])
+         wg=zeros((self.data.npoints,self.nv),Float32)     # weighted gradient array
          for i in range(self.nv):
-               g[:,i] = (self.model.gradient(self.variables[i]) / self.data.e).astype(Float32)
-         self.lsqmat=matrixmultiply(transpose(g),g)
-         self.rhs=matrixmultiply(obsminuscalc/self.data.e,g)
+            wg[:,i] = self.data.weightmatvec(g[:,i])
+         self.rhs=matrixmultiply(obsminuscalc,wg)   
+         self.lsqmat=matrixmultiply(transpose(g).astype(Float),wg.astype(Float))
          # Error bars
          self.emat=self.generalized_inverse(self.lsqmat)
          # damping:
@@ -2568,8 +2693,13 @@ class fitdensemodels1d:
          # invert to find shift (no need really...)
          self.inverse=self.generalized_inverse(self.lsqmat)
          shifts = matrixmultiply(self.inverse,self.rhs).astype(Float32)
-         self.chi2=sum(obsminuscalc*obsminuscalc/self.data.e/self.data.e)
+# 1D          self.chi2=sum(obsminuscalc*obsminuscalc/self.data.e/self.data.e)
+         self.chi2=sum(obsminuscalc* self.data.weightmatvec(obsminuscalc) )
+         if self.data.npoints-self.nv > 0:
          self.reducedchi2=self.chi2/(self.data.npoints-self.nv)
+            self.emat=self.emat*self.reducedchi2
+         else:
+            self.reducedchi2=0. # No chi^2 correction here - it makes errors wrongly zero
          print "Cycle ",self.icyc," chi^2 = ",self.chi2, "Reduced chi^2=",self.reducedchi2
          for item in self.variables:
             self.model.apply_shift(item,shifts[self.vd[item]])
@@ -2579,13 +2709,14 @@ class fitdensemodels1d:
       print "Variable  Value           Esd             Shift           Shift/esd"
       for item in self.variables:
          i=self.vd[item]
-         e=sqrt(self.emat[i,i]*self.reducedchi2)
+         e=sqrt(self.emat[i,i])
          self.model.set_errorbar(item,e)
          print "%8s  %-10.7e"%( item,self.model.get_value(item)),
          if e>0.:
             print " %-10.7e  %-10.7e  %-10.7e"%(e, shifts[i] , shifts[i]/e )
          else:
-            print "Hopefully not refined"
+            print " %-10.7e  %-10.7e  NaN"%(e, shifts[i] )
+#      print "Lsq Matrix", self.lsqmat
       print "Time for that cycle was:",time.time()-start
          
    def generalized_inverse(self,matrix):
@@ -2593,7 +2724,14 @@ class fitdensemodels1d:
        # I hope the LinearAlgebra package does not need this??
        # The idea is to make the diagonal of the matrix have equal elements
        # which is equivalent to making all variables be in units of ~1 esd
+       try:
        s=sqrt(diagonal(matrix))
+       except ValueError:
+          print "Least squares matrices should always (by definition) have positive",\
+                "diagonal elements"
+          print matrix
+          print diagonal(matrix)
+          raise
        mycopy=matrix.copy().astype(Float)
        for i in range(matrix.shape[0]):
           if s[i]>0.:
@@ -2638,6 +2776,108 @@ and arrays iw and di
 
 This would be used for the optimisation of a crystal structure against
 correlated integrated intensity data.
+
+All that needs to be modified from the 1 dimensional weight matrix follows
+from the mathematics described in the opening chapter. In the original
+implementation of refinement against a Lanthanum Hexaboride structure
+the key lines were as follows:
+
+\begin{verbatim}
+  for i in range(nv):
+     rhs[i]=Numeric.dot(diff,myciidata.fastmatvec(g[:,i]))
+     for j in range(nv):
+         lsqA[i,j]+=Numeric.dot(myciidata.fastmatvec(g[:,i]),g[:,j])
+         lsqA[j,i]+=Numeric.dot(g[:,j], myciidata.fastmatvec(g[:,i]))
+  chi=Numeric.dot(diff,myciidata.fastmatvec(diff))
+  rchi=chi/(nt-nv)
+\end{verbatim}
+
+When the weight matrix is diagonal this reduces to:
+
+\begin{verbatim}
+         for i in range(self.nv):
+               g[:,i] = (self.model.gradient(self.variables[i]) / self.data.e).astype(Float32)
+         self.lsqmat=matrixmultiply(transpose(g),g)
+         self.rhs=matrixmultiply(obsminuscalc/self.data.e,g)
+\end{verbatim}
+
+In the implementation of the dense gradients and 1D data weight matrix we 
+already have all the information needed, as it currently requires
+derivatives of all data points to be present with respect to all parameters.
+So we only need to modify the densemodels object sufficiently to take
+the error bars into account properly. Indeed, we might note that a diagonal
+weight matrix is merely a special case of a non-diagonal weight matrix
+and combine both into the same method. There ought to be no trade-off 
+involved in doing so?
+
+So we need to transform the four lines in the fitdensemodels1d 
+from being \code{g = model.gradient/data.e ; lsqmat=g x $g{^T}$ ; rhs=g.diff/e}
+to something else. If we call a data.weightmatvec(vector) which returns
+the vector multiplied by the weights, then we are away. 
+
+If you are reading this document it will make little sense, but I leave this
+section in with the answer to the apparent problem now implemented in the
+densemodelfit object.
+
+
+\begin{verbatim}
+         g=zeros((self.data.npoints,self.nv),Float32)               # gradient array
+         for i in range(self.nv):                        # avoid this somehow?
+            g[:,i] = self.model.gradient(self.variables[i])
+         wg=zeros((self.data.npoints,self.nv),Float32)     # weighted gradient array
+         for i in range(self.nv):
+            wg[:,i] = self.data.weightmatvec(self.model.gradient(self.variables[i]))
+         self.rhs=matrixmultiply(obsminuscalc,wg)   
+         self.lsqmat=matrixmultiply(transpose(g),wg)
+\end{verbatim}
+
+And with that the author was able to shut down the laptop before midnight with
+a satisfied smile. The correlations have been tamed.
+
+
+We can check that this is correct (or not) by setting up a test model with
+a test dataset.
+
+@o testdensedemodelfit.py
+@{
+""" Testing for the non-diagonal weight matrix least squares """
+@< pycopyright @>
+
+import model, densemodelfit
+from Numeric import *
+class testmodelclass(model.model):
+   def __init__(self,**kwds):
+      self.variables = map(str, range(kwds['npoints']) )         
+      model.model.__init__(self)
+   def compute(self,data):
+      self.ycalc=self.vv
+      self.g=zeros(self.vv.shape,Float32)
+   def gradient(self,variable):
+      g=zeros(self.vv.shape,Float32)
+      g[self.vd[variable]]=1.
+      return g
+
+class testdataclass:
+   def __init__(self):  
+      import RandomArray
+      self.x=arange(3)
+      self.y=RandomArray.random(3) # obs
+      self.npoints=3
+      self.matrix = array( [[ 1.0, 1.0, 0.1] , [ 1.0, 1.0, 0.1] , [0.1, 0.1, 2.0 ] ], Float32)
+      self.d={}
+   def weightmatvec(self,vec):
+      return matrixmultiply(self.matrix,vec)
+
+if __name__=="__main__":
+   m=testmodelclass(npoints=3)
+   d=testdataclass()
+   o=densemodelfit.densemodelfit(data=d,model=m)
+   o.refine(ncycles=3)
+   print "Data :",d.y
+   print "Model:",m.ycalc
+   diff=m.ycalc-d.y
+   print "Uncorrelated residual",sum(diff*diff)
+@}
 
 \section{Sparse gradients, 2D weight matrix}
 
@@ -3199,19 +3439,19 @@ class profvalplusback(model.model):
       # have to walk array
          halfway=0.5*(data.y[xymin]+data.y[xymax])
          i=xymax
+         xl=data.x[0]
          while i > 0: 
             i=i-1
             if data.y[i]<halfway:
                xl=data.x[i]
                break
-            xl=data.x[0]
          i=xymax
+         xh=data.x[-1]
          while i < data.x.shape[0]: 
             i=i+1
             if data.y[i]<halfway:
                xh=data.x[i]
                break
-            xh=data.x[-1]
       self.vv[self.vd['width']] = abs(xl-xh)
          self.set['width']=True
       if not self.set['eta']:
@@ -3252,7 +3492,7 @@ class profvalplusback(model.model):
       Returns the appropriate bit of it via the dictionary self.gl (gradient location)
       """
       if variable=='area':
-         return self.ycalc/self.vv[self.vd['area']]
+         return (self.ycalc/self.vv[self.vd['area']]).astype(Float32)
       if variable=='back':
          return ones(self.ycalc.shape,Float32)
       return self.pva[ self.gl[variable]  ] 
@@ -3264,7 +3504,7 @@ class profvalplusback(model.model):
 @< pycopyright @>
 
 import profvalplusback
-import fitdensemodels1d
+import densemodelfit
          
 
 if __name__=="__main__":
@@ -3289,7 +3529,7 @@ if __name__=="__main__":
       lh.sort()
       dat.setrange(lh)
    model=profvalplusback.profvalplusback()
-   optimiser=fitdensemodels1d.fitdensemodels1d(model=model,data=dat)
+   optimiser=densemodelfit.densemodelfit(model=model,data=dat)
    optimiser.refine(ncycles=1)
    while raw_input("More cycles?") != "":
       optimiser.refine(ncycles=1)
@@ -8029,47 +8269,80 @@ We will make a little command line script which takes the name of a dils
 file, the name of a pdb file, and initial values for the solvent scattering.
 It will try to refine the overall scale and two solvent scattering parameters.
 
-@d solventrefine.py
+@o solventmodel.py
 @{
 @< pycopyright @>
 from Numeric import *
-
-class solventmodel(model):
-   def __init__(self,Asolv=0.0,Bsolv=0.0):
-      self.vv=array([Asolv,Bsolv])
-      self.variables=[Scale,Asolv, Bsolv]
-   def compute(self,peak):
+import model
+class solventmodel(model.model):
+   def __init__(self,**kwds):
+      self.variables=['scale','Asolv','Bsolv']
+      model.model.__init__(self,**kwds)
+   def compute(self,data):
       # peak here needs to specify h,k,l,fcalc
-      s = peak.sinthetaoverlambda2()
-      y = peak.icalc() * ( 1.0 - 2.* self.A * exp(-   self.B * s ) + 
-                            self.A * self.A * exp(-2.*self.B * s ) ) 
-
-
-      
-
+      self.ycalc=zeros(data.npoints,Float32)
+      self.gradients=zeros((data.npoints,3),Float32)
+      scale=self.vv[self.vd['scale']]
+      A =   self.vv[self.vd['Asolv']]
+      B =   self.vv[self.vd['Bsolv']]
+      for i in range(data.npoints):
+         s = data.sinthetaoverlambda2(i)   # peaks must provide their d-spacings and icalc
+         fsq=data.fsq[i]
+         self.ycalc[i]=scale * fsq * ( 1.0 - 2.* A * exp(-B * s ) + 
+                                             A * A * exp(-2.* B * s ) ) 
+         self.gradients[i,0]= self.ycalc[i]/scale  # Scale factor
+         self.gradients[i,1]= 2 * scale * fsq * (A*exp(-2*B*s)-exp(-B*s))
+         self.gradients[i,2]= 2 * scale * s * A * fsq * (exp(-B*s)-A*exp(-2*B*s))
+#         print data.ciiobject.HKL[i],s,self.ycalc[i],self.gradients[i,:]
+   def gradient(self, variable):
+      if variable=='scale':
+         return self.gradients[:,0]
+      if variable=='Asolv':
+         return self.gradients[:,1]
+      if variable=='Bsolv':
+         return self.gradients[:,2]
 
 if __name__=="__main__":
    # test - read the command line arguments and use the functions
    import sys
-   import cii         # For correlated integrated intensity computations
-   import cctbxfcalc  # For a set of fcalc numbers
-
+   import solventrefinedata
+   import densemodelfit
    try:
       ciifile = sys.argv[1]
-      pdbfile = sys.argv[2]
-      Asolv   = float(sys.argv[3])
-      Bsolv   = float(sys.argv[4])
+      cclfile = sys.argv[2]
+      pdbfile = sys.argv[3]
+      Asolv   = float(sys.argv[4])
+      Bsolv   = float(sys.argv[5])
+
    except:
-      print "Usage: %s ciifile pdbfile A_solv B_solv "%(sys.argv[0])
+      print "Usage: %s ciifile cclfile pdbfile A_solv B_solv "%(sys.argv[0])
       print "Attempts to fit solvent scattering parameters"
       sys.exit()
-   ciiobj = cii.ciimatrix(ciifile)
-   fcalc = cctbxfcalc.getfcalcfrompdb(pdbfile)
-   model = solventmodel(Asolv,Bsolv)
-   optimiser = sparsedataleastsquares(model,ciiobj)
    
-   optimiser.cycle()
+   ciidataobj=solventrefinedata.solventrefinedata(ciifile,cclfile,pdbfile)
+   # estimate the scale factor:
+   calc=sum(ciidataobj.fsq)
+   obs= sum(ciidataobj.ciiobject.Ihkl)
+   s = obs/calc
+   model = solventmodel(Asolv=Asolv,Bsolv=Bsolv,scale=s)
+
+   optimiser = densemodelfit.densemodelfit(model=model,data=ciidataobj,marq=2.0)
+   
+   optimiser.refine()
+   while raw_input("More cycles?") not in ["Q","q","n","N","0",""]:
+      optimiser.refine()
 @}
+
+
+\section{Structure refinement}
+
+We will begin with a very simple example model, which has already been successfully
+refined using correlated integrated intensities in order to check the 
+implementation of the optimiser and maths.
+Later we will need to make the crystal structure model object somewhat more
+efficient in terms of applying shifts etc.
+
+FIXME: Put the LaB6 model in here.
 
 \section{Magnetic scattering}
 
@@ -8455,8 +8728,8 @@ import sys,os,time
 
 import powderdata
 import profvalplusback
-import fitdensemodels1d
-
+import densemodelfit
+import Numeric
 
 class twodplot:
    def __init__(self,dat):
@@ -8495,6 +8768,7 @@ class twodplot:
       Tk.Button(master=self.bf, text='LogX', command=self.logx).pack(side=Tk.LEFT)
       Tk.Button(master=self.bf, text='Open xye File', command=self.openxye).pack(side=Tk.LEFT)
       Tk.Button(master=self.bf, text='Open mca File', command=self.openmca).pack(side=Tk.LEFT)
+      Tk.Button(master=self.bf, text='Open DILS File', command=self.opendil).pack(side=Tk.LEFT)
       Tk.Button(master=self.bf, text="Fit peak", command=self.estimate).pack(side=Tk.LEFT)
       Tk.Button(master=self.bf, text="Refine prev peak", command=self.pf).pack(side=Tk.LEFT)
       self.bf.pack(side=Tk.BOTTOM)
@@ -8526,16 +8800,38 @@ class twodplot:
       self.a.set_ylim(self.yfull)
       self.canvas.show()
 
+   def opendil(self):
+      import solventrefinedata, solventmodel
+
+      ciifile=tkFileDialog.askopenfilename(initialdir=os.getcwd(),title="dils file?")
+      cclfile=tkFileDialog.askopenfilename(initialdir=os.getcwd(),title="ccl file?")
+      pdbfile=tkFileDialog.askopenfilename(initialdir=os.getcwd(),title="pdb file?")
+      self.dat=solventrefinedata.solventrefinedata(ciifile,cclfile,pdbfile)
+      # estimate the scale factor:
+      calc=sum(self.dat.fsq)
+      obs= sum(self.dat.ciiobject.Ihkl)
+      s = obs/calc
+      self.model = solventmodel.solventmodel(Asolv=0.89,Bsolv=40.0,scale=s)
+      self.optimiser=densemodelfit.densemodelfit(model=self.model,data=self.dat)
+      self.optimiser.refine(ncycles=10)
+      self.a.cla()
+      self.a.plot(self.dat.x,self.dat.y)
+      self.xfull=self.a.get_xlim()
+      self.yfull=self.a.get_ylim()
+      self.a.set_xlim(self.xfull)
+      self.a.set_ylim(self.yfull)
+      self.replot()
+
 
 
    def pf(self):
-      self.optimiser.refine(ncycles=10)
+      self.optimiser.refine(ncycles=1)
       self.replot()
 
    def estimate(self):
       self.dat.setrange(self.a.get_xlim())
       self.model=profvalplusback.profvalplusback()
-      self.optimiser=fitdensemodels1d.fitdensemodels1d(model=self.model,data=self.dat)
+      self.optimiser=densemodelfit.densemodelfit(model=self.model,data=self.dat)
       self.optimiser.refine(ncycles=10)
       self.replot()
 
@@ -8549,13 +8845,17 @@ class twodplot:
       if self.model != None:
          self.a.plot(self.dat.x,self.model.ycalc,'g')
       middle=0.5*(yr[0]+yr[1])
-         self.a.plot(self.dat.x,middle+self.dat.y-self.model.ycalc,'r')
-         self.label.config(text="Position: %f +/- %f" % (
-                   self.model.get_value('center'),
-                   self.model.get_errorbar('center'))  )
+         d = self.dat.y-self.model.ycalc
+         d = d * self.dat.weightmatvec(d)
+         d = d * abs(yr[0]-yr[1]) / Numeric.maximum.reduce(d)
+         self.a.plot(self.dat.x, d+middle ,'r')
       self.a.set_xlim(xr)
       self.a.set_ylim(yr)
       self.canvas.show()
+      if self.model != None:
+         self.label.config(text="Position: %f +/- %f" % (
+                   self.model.get_value('center'),
+                   self.model.get_errorbar('center'))  )
 
 
 
@@ -8576,12 +8876,12 @@ class twodplot:
       self.canvas.show()
 
    def on_3(self,event):
-      self.dat.setrange()
-      self.a.cla()
-      self.a.plot(self.dat.x, self.dat.y)
+#      self.dat.setrange()
+#      self.a.cla()
+#      self.a.plot(self.dat.x, self.dat.y)
       self.a.set_xlim(self.xfull)
       self.a.set_ylim(self.yfull)
-      self.model=None
+#      self.model=None
       self.canvas.show()
 
    def on_2(self,event):
@@ -8635,7 +8935,7 @@ class twodplot:
 
 
 if __name__=="__main__":
-   import epffile, powbase, mcadata
+   import epffile, powbase, mcadata, ciidata
    if len(sys.argv)<3:
       print "Usage: %s filename format"%(sys.argv[0])
       x=arange(0.0,3.0,0.01)
@@ -8653,7 +8953,7 @@ if __name__=="__main__":
          raise
 
    root = Tk.Tk()
-   root.wm_title("Embedding in TK")
+   root.wm_title("Linarp Is Not A Rietveld Program")
    p=twodplot(dat)
 
    Tk.mainloop()
