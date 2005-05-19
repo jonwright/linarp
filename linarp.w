@@ -65,7 +65,7 @@
 
 
 \title{\textbf{\textsf{Linarp}} \\ Linarp Is Not A Rietveld Program}
-\author{JPW + anyone who cares to contribute}
+\author{JPW + AJM + anyone who cares to contribute}
 \date{Started May 4, 2004, already it is \today}
 
 \maketitle
@@ -77,7 +77,9 @@ where the integration of the powder data and the structure refinement
 are separated.
 The name Linarp derives from the recursive acronym that 
 \textbf{L}inarp \textbf{I}s \textbf{N}ot \textbf{A} \textbf{R}ietveld 
-\textbf{P}rogram
+\textbf{P}rogram.
+Or you could prefer ``\textbf{LIN}e\textbf{AR} transformation of \textbf{P}owder
+data'', but that stretches the imagination a little bit too much.
 }
 
 \tableofcontents
@@ -2246,6 +2248,139 @@ void initpylibchol(void)
 @}
 
 
+\subsection{Eigenvector and eigenvalues}
+
+Despite the existence of highly optmised library routines for 
+solving symmetric eigenvalue problems, out of interest
+it was decided to attempt to implement a tailored sparse
+algorithm using the Jacobi method. The reasoning is that
+not only the sparse pattern if predicatable, but also the 
+magnitudes of various elements in the matrix. It is generally
+larger closer to the diagonal.
+
+From the book ``Matrix Computations'' by Golub and Van Loan... 
+Jacobi's idea is to apply rotations of the form $J(p,q,\theta)$
+where $J$ is an identity with $\cos\theta$ on the diagonal at
+rows $p$ and $q$ and $\pm\sin\theta$ for elements pq. We overwrite
+the matrix by $J^TAJ$ and this will move closer to a diagonal form
+provided we choose $\theta$ correctly. 
+
+The 2 by 2 symmetric schur decomposition is required to do that. 
+\[ 0  = b_{pq} = a_{pq}(c^2 - s^2)+(a_{pp}-a_{qq})cs \]
+If $a_pq$ was already zero we do nothing, setting $(c,s)=(1,0)$. 
+Otherwise:
+\[ \tau = \frac{a_{qq}-a_{pp}}{2a_{pq}} \]
+and $t=s/c$. Now, $t$ solves the quadratic:
+\[ t^2 + 2\tau t -1 = 0 \].
+\[ t = -\tau \pm \sqrt{1+\tau^2} \]
+From the smaller root we get:
+\[ c = \frac{1}{\sqrt{1+t^2} \]
+and $s=tc$. The reason for choosing the smaller root
+was to make $\theta$ be a small angle and minimise the difference
+between the new matrix and the old one (avoiding wild oscillations).
+
+@d symshur
+@{
+      subroutine symshur(A,lda,p,q,c,s)
+C Given input symmetric matrix A(lda,*) and requested indices p,q
+C computes s,c such that A(p,q) is zeroed by a Jacobi rotation
+C using s,c
+      integer lda,p,q
+      real A(lda,*) 
+      real s,c ! OUTPUT
+      real tau
+      if (A(p,q).ne.0.) then
+         tau = (A(q,q)-A(p,p))/(2.*A(p,q))
+         if (tau.ge. 0.) then
+            t =  1./( tau + sqrt(1.+tau*tau))
+         else
+            t = -1./(-tau + sqrt(1.+tau*tau))
+         endif
+         c = 1. / sqrt(1.+t*t)
+         s = t*c
+      else
+         c=1.
+         s=0. 
+      endif
+      return
+      end subroutine symshur
+@}
+
+
+@d jacobirot
+@{
+      subroutine jacobirot(A,lda,V,ldv,p,q,c,s)
+C Applies the rotation defined by  c, s to give:
+C    A = J^T A J
+C    V = V J
+C
+C { B_pp  B_pq }  =  { c s }^T (A) { c s }
+C { B_qp  B_qq }  =  {-s c }       {-s c }
+C
+      integer lda,ldv,p,q
+      real A(lda,*),V(ldv,*),c,s
+      integer i,j,n
+      real wp(lda),wq(lda)
+      wp(:)=A(:,p)
+      wq(:)=A(:,q)
+      A(:,p)=c*wp-s*wq
+      A(:,q)=c*wp+s*wq
+      A(p,1:lda)=A(:,p)
+      A(q,1:lda)=A(:,q) ! Preserve symmetry
+C     V(r,s) = V(r,s)
+      wp=V(:,p)
+      wq=V(:,q)
+      V(:,p) = c*wp - s*wq
+      V(:,q) = c*wp + s*wq
+      end subroutine jacobirot
+@}
+
+@o jacobitest.f
+@{
+@< symshur @>
+@< jacobirot @>
+      program jacobi
+      real A(10,10),V(10,10)
+      integer i,p,q
+      real c,s
+      data A/10, 9, 8, 0, 0, 0, 0, 0, 0, 0,
+     +        9,10, 9, 8, 0, 0, 0, 0, 0, 0,
+     +        8, 9,10, 9, 8, 0, 0, 0, 0, 0,
+     +        0, 8, 9,10, 9, 8, 0, 0, 0, 0,
+     +        0, 0, 8, 9,10, 9, 8, 0, 0, 0,
+     +        0, 0, 0, 8, 9,10, 9, 8, 0, 0,
+     +        0, 0, 0, 0, 8, 9,10, 9, 8, 0,
+     +        0, 0, 0, 0, 0, 8, 9,10, 9, 8,
+     +        0, 0, 0, 0, 0, 0, 8, 9,10, 9,
+     +        0, 0, 0, 0, 0, 0, 0, 8, 9,10 /
+      V=0.
+      do i = 1,10
+        V(i,i)=1.
+      enddo
+      p=4
+      q=5
+C      do i=1,10
+C       do p=1,10
+C        do q=p+1,10
+          call symshur(A,10,p,q,c,s)
+          call jacobirot(A,10,V,10,p,q,c,s)
+C        enddo
+C      enddo
+C      enddo
+      write(*,*)"A"
+      do i = 1,10
+         write(*,*)A(i,:)
+      enddo
+      write(*,*)"V"
+      do i = 1,10
+         write(*,*)V(i,:)
+      enddo
+      stop
+      end program jacobi
+@}
+    
+o jacobitest.py
+
 
 
 \section{Python wrapper}
@@ -2281,7 +2416,8 @@ with something else and get the rest of the functionality.
          items=f.readline().split()
          self.IP[i]=int(items[1])
          self.HKL[i]=[int(items[3]),int(items[4]),int(items[5])]
-         self.Ihkl[i]=float(items[-1])/100
+         # This was divided by 100, insane, why?
+         self.Ihkl[i]=float(items[-1])
         except ValueError:
            print items
            print "Sorry - problems interpreting your file"
@@ -2652,6 +2788,7 @@ class solventrefinedata(ciidata.ciidata):
       for line in c:
          if line[0]=="C":
             [a,b,c,alpha,beta,gamma]=map(float,line[1:].split())
+      self.unitcellpars=[a,b,c,alpha,beta,gamma]
       d['rm'] = n.array( [ [ a*a, a*b*cos(gamma*pi/180) , a*c*cos(beta *pi/180) ] ,
                            [ a*b*cos(gamma*pi/180) , b*b, b*c*cos(alpha*pi/180) ] ,
                            [ a*c*cos(beta *pi/180) , b*c*cos(alpha*pi/180) , c*c] ] )
@@ -2673,6 +2810,57 @@ In the case of image data we may need to be careful about
 memory usage.
 
 Need to think carefully how to do this!
+
+
+\chapter{Wilson plots}
+
+Compute a Wilson plot...
+
+
+@o wilson.py
+@{
+
+import solventrefinedata,sys, Numeric
+from cctbx import miller,crystal
+
+dilsfile = sys.argv[1]
+cclfile  = sys.argv[2]
+
+mydata = solventrefinedata.solventrefinedata(dilsfile,cclfile)
+
+from cctbx.array_family import flex
+
+mi = flex.miller_index(mydata.ciiobject.HKL.astype(Numeric.Int).tolist())
+sym = raw_input("Please give space group symbol   ")
+
+ms = miller.set(  crystal.symmetry( unit_cell = mydata.unitcellpars,
+                                    space_group_symbol = sym ), mi )
+
+e = ms.epsilons()
+
+np = e.data().size()    # Number of epsilons
+
+
+
+# We want intensity divided by epsilon
+
+for i in range(30): #np):
+   hkl = e.indices()[i]
+   eps = e.data()[i]
+   obsI= mydata.ciiobject.Ihkl[i]
+   dhkl= mydata.ciiobject.HKL[i]
+   assert dhkl == hkl
+   print hkl,dhkl,eps,obsI,obsI/eps
+
+binner=ms.setup_binner(reflections_per_bin=50)
+
+binner.show_summary()
+
+@}
+
+
+
+
 
 \chapter{Factor analysis and non parametric statistics}
 
@@ -3749,6 +3937,957 @@ class ichooser:
       self.chi2=Numeric.sum(obsminuscalc * self.ciiobject.weightmatvec(obsminuscalc) )
 
 @}
+
+\chapter{Maximum likelihood}
+
+\chapter{Maximum likelihood}
+
+\section{Introduction}
+Following a highly productive visit from Anders Markvardsen to the ESRF,
+we can now attempt to add some maximum likelihood methods to the 
+package. 
+The essential idea, in oversimplified form, is to allow the model to 
+be wrong, or at least, not quite right.
+In normal least squares, we minimise the goodness of fit, assuming the 
+model is actually going to describe the data properly once the 
+parameters have been adjusted. 
+The goodness of fit indicator only takes into account the differences
+between the model and data with the error bars on the data being taken
+into account.
+In real life, especially with complex problems, it is unreasonable to 
+expect the first model you invent to be a perfect solution to the problem
+and to fully explain your data. 
+The aim of the maximum likelihood approach is therefore to try to improve
+the model as much as possible, taking into account that the model might not
+be entirely correct.
+In order to do that, we will have to make some model not only for the data, but
+also for the uncertainties on the model itself. 
+
+
+\section{Mathematics (as expressed in the Gaussian app of the
+  integral)}
+
+For now we will limit the problem to crystallography with overlapped peaks, 
+discussed extensively elsewhere in the this document, we can describe
+a goodness of fit to the data via a correlated $\chi^2$ statistic:
+
+\[ \chi^2 = \sum_{ij} (I_{obs,i}-I_{calc,i})W_{ij}(I_{obs,j}-I_{calc,j}) \]
+
+This is a quadratic depending only on the computed model and the observed 
+data and weights. If the weights were computed correctly, then it will
+not make a difference how the $I_{obs}$ are chosen, so long as they
+are consistent with the data. Later we will change ``obs'' to ``d''.
+
+The probability associated with this statistic is then given by something
+not unlike:
+
+\[ P(I) = K \exp(-\chi^2) \]
+
+Where the $K$ is chosen such that the distribution is normalised. This
+is only possible if there are no exact peak overlaps, or if you insist
+that all peaks are positive. Interpretation of a probability is left to the
+individual, but you might like to think about the Gaussian probability 
+distribution which goes with your error bar.
+
+Adding on an error bar for the model is simple enough in principle. We can
+define and model goodness of fit for a particular set of intensities in 
+an analogous way:
+
+\[ \chi^2 = \sum_{ij} (I_{test,i}-I_{model,i})W^{model}_{ij}(I_{test,j}-I_{model,j}) \]
+
+where the $I_{test}$ are some intensities that we are comparing to the model and 
+the weights are derived in some way depending on how well we think a particular
+intensity is computed by the model.
+
+The likelihood is then the convolution of these two probability distributions. That
+means to say that you take all possible values of the intensities themselves 
+and ask how well they fit both the model and the data.
+In the normal least squares approach we only took the one set of intensities which
+were computed from the model. 
+Considering some other sets of intensities, which might fit the data better, but fit
+the model worse is the whole idea.
+
+So, this likelihood is the product of two probability distributions (one for model
+and one for data), integrated over all values of intensity (should really only be 
+the positive ones, but that is a bit hard to do).
+
+\[ L = \int P^{data}(I) P^{model}(I) dI \]
+
+Both of these are $\exp(-$quadratic$)$, so we can sum up the two quadratics to 
+get a single Gaussian probability distribution. That Gaussian is going 
+to be described by:
+
+\[ f(\mb{I}) = (\mb{I^d} - \alpha \mb{I})^T \mb{W^d} (\mb{I^d} - \alpha \mb{I})   + 
+               (\mb{\tilde{I}^m} -        \mb{I})^T \mb{\tilde{W}^m} 
+               (\mb{\tilde{I}^m} -        \mb{I})  \]
+
+where:
+\begin{itemize}
+\item $\mb{I^d}$ are the ``observed'' intensities from the data
+\item $\alpha$ is a scale factor
+\item $\mb{I}$ are to be integrated out, eventually
+\item $\mb{W^d}$ weights from the data (transforming the error bars on the observed data)
+\item $\mb{\tilde{I}^m}$ intensities computed from a model.
+\item $\mb{\tilde{W}^m}$ weights computed from the model. 
+\end{itemize}
+This looks pretty symmetric in terms of model and data, as it should.
+
+We would like to transform this to give a single quadratic, as that might be easier
+to get an integral of, and also to normalise.
+At a maximum $df/dI = 0$, so we can differentiate and set equal to zero to find
+the top of our combined distribution...
+
+\[ \frac{df}{d\mb{I}} = \mb{0} = 2 \alpha \mb{W^d}(\mb{I^d}-\alpha\mb{I}) + 
+                       2        \mb{\tilde{W}^m}(\mb{\tilde{I}^m}-      \mb{I}) \]
+So that:
+\[  \alpha \mb{W^d} \mb{I^d} + \mb{\tilde{W}^m}\mb{\tilde{I}^m} =   
+    \alpha^2 \mb{W^d} \mb{I} +  \mb{\tilde{W}^m}  \mb{I} \]
+\[  \alpha \mb{W^d} \mb{I^d} + \mb{\tilde{W}^m}\mb{\tilde{I}^m} =
+    \mb{B} =  \left( \alpha^2 \mb{W^d} +  \mb{\tilde{W}^m} \right)  \mb{I} \]
+Denote the solution to this equation as $\mb{I}^s$ and we have:
+\[ \mb{S I^s}=\mb{B} \]
+where
+\[ \mb{S} = \alpha^2\mb{W^d} + \mb{\tilde{W}^m} \]
+\[ \mb{B} =  \alpha \mb{W^d} \mb{I^d} + \mb{\tilde{W}^m}\mb{\tilde{I}^m} \]
+If the scale factor, $\alpha$ is known, then both $\mb{S}$ and $\mb{B}$ are also known
+and we can in principle solve for $\mb{I^s}$. Why S? (there is no
+particular good reason why the notation S is used here - hence another
+letter may be used?)
+
+Given this set of $\mb{I^s}$ we can write:
+\[ f(\mb{I}) = f(\mb{I^s}) + (\mb{I} - \mb{I^s})^T \mb{S} (\mb{I} - \mb{I^s}) \]
+
+The likelihood integral expressed in terms of $f$ reads
+\[ L \propto (2\pi )^{-N/2}\sqrt{\det (\mb{\tilde{W}^m})}\int \exp (-f(\mb{I})/2) d\mb{I} \]
+Notice that the normalisation constant from the data is not included
+since (i) for the case where $\mb{W^d}$ is singular it is not defined; (ii)
+regardless it can be ignored since it stays constant. $N$ is the
+dimension of vector $\mb{I}$. The likelihood integral can be
+evaluated analytically and   
+\[ L \propto \frac{\sqrt{\det(\mb{\tilde{W}^m})} \exp (-f(\mb{I^s})/2)}{
+  \sqrt{\det (\mb{S}) }} \]
+We may define the following ML figure-of-merit
+\[ \chi^2_{ml}=-2\log(L)=f(\mb{I^s})+\ln(\det [\mb{(\tilde{W}^m})^{-1}\mb{S}])
+\]
+Notice it might be useful to calculate $\det
+[\mb{(\tilde{W}^m})^{-1}\mb{S}]$ as $\det [\mb{\alpha^2 (\tilde{W}^m})^{-1}
+  \mb{W^d}+\mb{II}]$, where $\mb{II}$ here stands for the identity
+matrix!! (not a brilliant notation). Also, it may be computationally
+advantageous to use that $f(\mb{I^s})$ can be written as
+\[ f(\mb{I^s}) = (\mb{I^d})^T \mb{W^d} \mb{I^d} + (\mb{\tilde{I}^m})^T 
+\mb{\tilde{W}^m} \mb{\tilde{I}^m} -(\mb{I^s})^T \mb{S} \mb{I^s} \]
+who know!?
+
+
+\section{Finding a set of compromise intensities, $\mb{I^s}$}
+
+Having gotten the maths in the previous section, we now need to concentrate
+on making some actual computations. 
+We will assume that we have a model available and that the model has only
+diagonal weights.
+This should reduce to conventional least squares in the case that the model
+weights tend to infinity...
+
+The equations to solve are:
+\[ \mb{S I^s}=\mb{B} \]
+where
+\[ \mb{S} = \alpha^2\mb{W^d} + \mb{\tilde{W}^m} \]
+\[ \mb{B} =  \alpha \mb{W^d} \mb{I^d} +
+\mb{\tilde{W}^m}\mb{\tilde{I}^m} \]
+
+The weights on the data and $ \mb{I^d}$ values will come from a correlated 
+integrated intensity object.
+The model weights and model computed values will come from a likelihood
+model object (see below).
+
+The scale factor, $\alpha$ needs to be estimated, such that it minimises the
+maximum likelihood figure of merit. For now we take it as known. 
+An object to do the maximum likelihood figures of merit ought to include
+the following things:
+
+\begin{itemize}
+\item \emph{Data} Weight matrix from the data
+\item \emph{Data} Observed values of intensities
+\item \emph{Data} Weights from the model
+\item \emph{Data} Computed model values
+\item \emph{Data} A scale factor $\alpha$
+\item \emph{Method/Data} Generate matrix $\mb{S}$ and vector $\mb{B}$
+\item \emph{Method} Generate the $\mb{I^s}$ values
+\item \emph{Method} Optimise the $\alpha$ value
+\item \emph{Method} Compute the figures of merit for model, data and combined maximum likelihood.
+\item ?
+\end{itemize}
+
+A python object therefore needs to hold internally a ``normal'' correlated integrated
+intensity object, also a model, and a scale factor. For now the scale factor is 
+just a constant.
+
+
+
+\section{Calculating $\tilde{I}^m$ and $\tilde{W}^m$}
+The 'tilde' model intensity is calculated as the mode (fancy for maximum)
+of the model probability density, and the 'tilde' model weight (in most cases)
+as the second derivative of minus the logorithm of the model probability density
+evaluated at the mode.
+
+There is a certain flexibility available with regards to defining what an intensity
+stands for; for instance, is it defined in units of counts or perhaps 
+electrons (that is, does it implicitely include the scale factor)? Or, does it
+include the powder multiplication factor $p_{\mb{H}}$ and so on. The powder
+multiplicity factor is defined as the number of distinct reflections that can
+be generated using the Laue symmetry elements from a given relection $\mb{H}$.
+The multiplicity factor equats to
+\begin{eqnarray}
+p_{\mb{H}} & = & \left| G \, \mb{H} \right| \ \ \mbox{for centric reflection}
+\nonumber
+\\ p_{\mb{H}} & = &
+2\left| G \, \mb{H} \right| \ \ \mbox{for acentric reflection}
+\nonumber \ \ .
+\label{eq:multiplicity}
+\end{eqnarray}
+where the notation $G$ is shorthand for the point group of the space group of
+the crystal. $|G|$ is the number of elements in this point group and 
+$\left| G \, \mb{H} \right|$ is a fancy (well mathematical) notation for expressing
+the number of ways the elements of $G$ can transform a given reflection
+$\mb{H}$ into other symmetry equivalent reflections including $\mb{H}$ itself
+(this is called the orbit of $\mb{H}$ in group theory).
+
+To confuse the issue of what an intensity stands for further, for powder
+diffraction data (and possibily other kinds of crystallographic data) it
+may be meaningful to study an intensity which is the sum of different
+symmetry unique reflections, i.e. consider and intensity of the form
+\[ I = \sum_{i=1}^{n_T} p_{\mb{H}_i} I_{\mb{H}_i}  \]
+where $n_T$ is the total number of symmetry unique reflections; $n_a$ of these
+may be acentric and $n_c$ centric. The model probability density
+expressed in terms of this intensity reads
+\[ p(I|I^m) = \frac{1}{2|G|\sigma_{\Delta}^2} \left( \frac{I}{D^2I^m}
+\right)^{n/4-1/2} \exp \left( - \frac{I-D^2I^m}{2|G|\sigma_{\Delta}^2} 
+\right) \, \mbox{I}_{n/2-1} \left( \frac{D\sqrt{II^m}}{|G|\sigma_{\Delta}^2}
+\right)
+\]
+$\sigma_{\Delta}^2=\Sigma_N-D^2\Sigma_P$, a description of what $\Sigma_N$, 
+$\Sigma_P$ and $D$ are will be discussed later (the reason for using the 
+$\sigma_{\Delta}$ notation is that it is used in a number of Reads papers and
+well why not use that notation?). $\mbox{I}_{n/2-1}(z)$ is the modified Bessel
+function of order $n/2-1$ and $n=2n_a+n_c$. 
+For the special case of a single acentric
+reflection ($n=2$) and where the multiplicity factor is not included in the definition
+of the intensity the model probability density becomes
+\[ p(I|I^m) = \frac{p}{2|G|\sigma_{\Delta}^2} 
+\exp \left( - \frac{I-D^2I^m}{2|G|\sigma_{\Delta}^2/p} 
+\right) \, \mbox{I}_{0} \left( \frac{D\sqrt{II^m}}{|G|\sigma_{\Delta}^2/p}
+\right)
+\] 
+$p$ is the multiplicity factor for the acentric reflection. Using that
+$|G|/p = |G|/(2|G \, \mb{H}|) = \epsilon /2$, where $\epsilon$ is the 
+expected intensity factor (in group theory $\epsilon$ is equal to the number
+of symmetry elements of $G$ which transform $\mb{H}$ into itself) then the
+above equation reads
+\[ p(I|I^m) = \frac{1}{\epsilon \sigma_{\Delta}^2} 
+\exp \left( - \frac{I-D^2I^m}{\epsilon \sigma_{\Delta}^2} 
+\right) \, \mbox{I}_{0} \left( \frac{D\sqrt{II^m}}{\epsilon \sigma_{\Delta}^2/2}
+\right)
+\] 
+Similarly for a single centric reflections ($n=1$) and still with the multiplicity 
+factor not included in the definition of the intensity the model probability 
+density is
+\[ p(I|I^m) = \frac{1}{2\epsilon \sigma_{\Delta}^2} 
+\left( \frac{I}{D^2I^m} \right)^{-1/4}
+\exp \left( - \frac{I-D^2I^m}{2\epsilon \sigma_{\Delta}^2} 
+\right) \, \mbox{I}_{-1/2} \left( \frac{D\sqrt{II^m}}{\epsilon \sigma_{\Delta}^2}
+\right)
+\]  
+
+For the purpose of calculating 'tilde' values define $\Sigma^m$, which equats to
+\begin{eqnarray}
+\Sigma^m & = & |G|\sigma_{\Delta}^2 \ \ \mbox{when intensity includes multiplicity factor}
+\nonumber
+\\ \Sigma^m & = &
+\epsilon \sigma_{\Delta}^2/2 \ \ \mbox{single acentric and no multiplicity factor}
+\nonumber 
+\\ \Sigma^m & = &
+\epsilon \sigma_{\Delta}^2 \ \ \mbox{single centric and no multiplicity factor}
+\nonumber 
+\ \ 
+\label{eq:}
+\end{eqnarray}
+Further introduce the dimensionless variables 
+\[ x = D^2I^m/\Sigma^m \]
+and
+\[ \tilde{x} = \tilde{I}^m/\Sigma^m \]
+$\tilde{x}$ correspond to the mode of the model probability density and is, 
+using the C-code, obtained by calling
+\[
+\tilde{x} = \mbox{get\_x\_tilde} (n,x) 
+\]
+$1/\tilde{W}^m$ is an estimate of the width of the model probability density. However,
+be aware that this 'width' parameter is designed with the purpose of evaluating a 
+max-like integral as accurate as possible, i.e. in this sense it is a technical parameter,
+and be careful with trying to interpret it as a physical parameter. Once $\tilde{x}$
+is calculated to get $\tilde{W}^m$, using the C-code, call
+\[ 
+(\tilde{W}^m)^{-1} = (\Sigma^m)^2 \cdot \mbox{get\_blur\_tilde} (n, x, \tilde{x})  
+\] 
+To obtain $\tilde{I}^m$ from $\tilde{x}$ simply do the multiplication 
+$\tilde{I}^m=\tilde{x}\Sigma^m$.
+
+For the calculation of derivatives, using the chain rule
+\[ \frac{\partial \tilde{I}^m}{\partial z} =
+\frac{\partial \tilde{I}^m}{\partial x} \frac{\partial x}{\partial z} 
+= \frac{\partial \tilde{x}}{\partial x} \frac{\partial D^2I^m}{\partial z}
+\] 
+$z$ is here some parameter. A function could easily be provided which calculate say 
+$\partial \tilde{x} / \partial x$ and thus it would only cost a few
+extra CPU flops to calculate $\partial \tilde{I}^m / \partial z$ compared to
+$\partial I^m / \partial z$. 
+
+\section{Some random code}
+
+@O maxlike.py
+@{
+"""
+Maximum Likelihood computations with correlated integrated intensities
+"""
+@< pycopyright @>
+
+from Numeric import sum
+class maxlike:
+   """
+   Maximum likelihood computations
+   """
+   def __init__(self,data,model,alpha=None):
+       """
+       Data should be a correlated integrated intensity object
+       Model should be a maximum likelihood model object
+       alpha is an optional float
+       """
+       self.data=data
+       self.model=model
+       self.alpha=alpha
+
+   def compute_I_s(self):
+       """
+       Computes I^s
+       """
+       if self.alpha == None:
+          self.alpha = sum(self.data.Ihkl)/sum(self.model.
+
+
+   def optimise_scale(self):
+       """
+       Maximises likelihood figure of merit by altering scale factor, alpha
+       """
+       pass
+   def max_like_fom(self):
+       """
+       Compute the maximum likelihood figure of merit
+       """
+       pass
+
+if __name__=="__main__":
+   # Do a demo and test run
+
+
+
+
+@}
+
+
+\section{Functions for computing $\Sigma$}
+
+@o likelihood_poly_app.c
+@{
+/* In order to calculate the maximum likelihood figure-of-merit in Eq. (8) in 
+   Acta Cryst. (2002) A58, 316-326 it is required that modified integrated 
+   intensities and modified Sigma^{blur}'s are calculated.
+
+   Denote:
+   
+     I - a calculated intensity from a partial model
+     Sigma^{blur} - a calculated blur variance proportional to the sum of the
+                    scattering factor squared of the atoms which have been 
+                    treated as the blur
+     I-tilde - modified calculated intensity necessary for calculating Eq. (8)
+     Sigma^{blur}-tilde - modified Sigma^{blur} again necessary for calculating Eq. (8)
+
+   Further introduce the dimensionless variables:
+
+     x          = I / Sigma^{blur}
+     x-tilde    = I-tilde / Sigma^{blur}
+     blur-tilde = Sigma^{blur}-tilde / (Sigma^{blur})^2
+ 
+   The functions below allow x-tilde to be calculated from x by using the 
+   get_x_tilde() for any order n, and allow blur-tilde to be calculated 
+   from x and x-tilde for any order n. To get I-tilde and Sigma^{blur}-tilde
+   from x-tilde and blur-tilde simply use the relationships above, and 
+
+     I-tilde            = Sigma^{blur} * x-tilde
+     Sigma^{blur}-tilde = (Sigma^{blur})^2 * blur-tilde
+   
+   This file was created 23/2-2005 by A.J.Markvardsen.
+
+*/
+
+#include "likelihood_poly_app.h"
+#include <stdio.h>
+
+/* Returns x_tilde given the order n and value x. It is required that
+n>=1 and x>=0; if this is not satisfied -1 returned (otherwise x_tilde>=0).  
+*/
+double get_x_tilde(int n, double x)
+{
+  switch (n)
+  {
+    case 1:
+      return n1_get_x_tilde(x);
+    case 2:
+      return n2_get_x_tilde(x);
+    case 3:
+      return n3_get_x_tilde(x);
+    case 4:
+      return n4_get_x_tilde(x);
+    case 5:
+      return n5_get_x_tilde(x);
+    case 6:
+      return n6_get_x_tilde(x);
+    case 7:
+      return n7_get_x_tilde(x);
+    case 8:
+      return n8_get_x_tilde(x);
+    case 9:
+      return n9_get_x_tilde(x);
+    default:
+      n -= 9;
+      return n9_get_x_tilde(x) + ((double) n);
+  }
+
+   return -1.0;
+}
+
+/* returns blur_tilde given the order n, x and x_tilde. It is required that
+n>=1, x>=0, x_tilde>=0. Also the return value much be >= 0, otherwise 
+something is badly wrong. */
+double get_blur_tilde(int n, double x, double x_tilde)
+{
+  if (n <= 2)
+    {
+      switch (n)
+	{
+	case 1:
+	  if (x <= 1.00001)
+	    {
+	      return 6.0;
+	    }
+	  else
+	    {
+	      return 4.0*x_tilde/( x_tilde - x + 1.0 );
+	    }
+	case 2:
+	  if (x <= 2.00001)
+	    {
+	      return 8.0;
+	    }
+	  else
+	    {
+	      return x_tilde/( 0.25*(x_tilde-x) + 0.5 );
+	    }
+	}
+      /* Control can never reach this point unless n < 1 , so suppress a compiler warning with: */
+      return 0.0;
+    }
+  else 
+    {
+      return x_tilde/( 0.25*(x_tilde-x-((double) n)) + 1.0 );
+  }
+}
+
+/* The functions below are the polynomial approximation implementation
+of get_x_tilde() for n = 1,2,...,9. Notice that all these functions 
+return -1 if x < 0. */
+
+double n1_get_x_tilde(double x)
+{
+  if (x >= 6.0)
+  {  
+    /* |x_app-x| < 1.5*10^-4 */
+    return x;
+  }    
+  else if  (x >= 2.0)
+  {
+    /* |x_app-x| < 2.6*10^-4 */  
+    return -3.02093831008580+x*(4.68465087308378+ 
+      x*(-1.92653715787374+x*
+      (0.54754459906799+x*
+      (-0.08853799404598+x*
+      (0.00767794768916-x*0.00027777885971)))));
+  }
+  else if (x >= 1.05) 
+  {  
+    /* |x_app-x| < 5*10^-4 */     
+    return -6.54688435356079+x*(12.09774375418268+ 
+      x*(-7.84003970740846+x* 
+      (2.64011849019381-x*0.34850763887436)));
+  }   
+  else if (x >= 1.0)
+  {
+    /* |x_app-x| < 3*10^-4 */      
+    return -5.4+x*(7.8 - x*2.4);
+  }
+  else if (x >= 0.0) 
+  {  
+    return 0.0;
+  }
+  else 
+  {
+    return -1.0; /* return -1 to indicate out of range error */
+  }
+}
+
+
+double n2_get_x_tilde(double x)
+{
+  if (x >= 30.0)
+  {
+    /* |x_app-g| < 9*10^-4 */
+    return x - 1.0 - 0.5/x;
+  }
+  else if (x >= 15.0)
+  {
+    /* |x_app-g| < 2.1*10^-4 */  
+    return -1.11527878316888+x*(1.00854398755907+  
+      x*(-0.00026783948144+x*0.00000305711944));    
+  }
+  else if (x >= 6.0)
+  {
+    /* |x_app-g| < 2.6*10^-4 */  
+    return -1.77149612752542+x*(1.25781372868776+  
+      x*(-0.03982014869021+x*  
+      (0.00322871150076+x*  
+      (-0.00013356414699+x*0.00000222751776))));   
+  }
+  else if (x >= 2.1)
+  {
+    /* |x_app-g| < 5*10^-4 */     
+    return -9.48779810698405+x*(9.91067279176725+  
+      x*(-4.28535299459017+x*  
+      (1.15495083484523+x*  
+      (-0.18015387743956+x*  
+      (0.01522668103031-x*0.00054040502086)))));
+  }
+  else if (x >= 2.0)
+  {
+    /* |x_app-g| < 3.5*10^-4 */      
+    return -6.66666666666667+x*(4.66666666666667 - x*0.66666666666667);
+  }
+  else if (x >= 0)
+  {
+    return 0.0;
+  }
+  else 
+  {
+    return -1.0; /* return -1 to indicate out of range error */
+  }
+}
+
+
+double n3_get_x_tilde(double x)
+{
+  if (x >= 6.0)
+  {
+    /* |x_app-g| < 1.5*10^-4 */
+    return x;
+  }
+  else if (x >= 1.75)
+  {
+    /* |x_app-g| < 4*10^-4 */     
+    return 1.30533201111855+x*(-0.22856696914614+  
+      x*(0.47122260593693+x*  
+      (-0.09161319318386+x*  
+      (0.00899074432418-x*0.00035512168798))));  
+  } 
+  else if (x >= 0.25)
+  {
+    /* |x_app-g| < 5.5*10^-4 */      
+    return 1.00292224125558+x*(0.31826749677695+  
+      x*(0.11206522544490+x*0.00616969794786)); 
+  }
+  else if (x >= 0.0)
+  {
+    /* |x_app-g| < 3*10^-4 */
+    return 1.0+x*(0.33333333333333 + x*0.08888888888889);
+  }
+  else 
+  {
+    return -1.0; /* return -1 to indicate out of range error */
+  }
+}
+
+
+double n4_get_x_tilde(double x)
+{
+  if (x >= 1000)
+  {
+    /* |x_app-g| < 5*10^4 */
+    return 1.0 + x;
+  }
+  else if (x >= 132)
+  {
+    /* |x_app-g| < 5*10^-4 */   
+    return 1.00461599384076+x*(0.99998917163314+0.00000000708627*x);
+  }
+  else if (x >= 23) 
+  {
+    /* |x_app-g| < 8.5*10^-4 */
+    return 1.03970101029391+x*(0.99898839901598+  
+      x*(0.00001017522517-x*0.00000003499571));
+  }
+  else if (x >= 5.2)
+  {
+    /* |x_app-g| < 5.5*10^-4 */
+    return 1.35457558621820+x*(0.91509576699761+  
+      x*(0.00987392707499+x*  
+      (-0.00060410539553+x*  
+      (0.00001867155695-x*0.00000022967330))));
+  }
+  else if (x >= 0.5)
+  {
+    /* |x_app-g| < 6*10^-4 */       
+    return 2.00718843582133+x*(0.47689762081362+  
+      x*(0.10767459321203+x*  
+      (-0.00414404284495+x*  
+      (-0.00147522755421+x*0.00015036537742))));
+  }
+  else if (x >= 0.0)
+  {
+    /* |x_app-g| < 5.4*10^-4 */    
+    return 2.0+x*(0.5+x*0.083333333);
+  }
+  else 
+  {
+    return -1.0; /* return -1 to indicate out of range error */
+  }
+}
+
+
+double n5_get_x_tilde(double x)
+{
+  if (x >= 5)
+  {
+    /* |x_app-g| < 2*10^-4 */
+    return x+2.0+1/x;
+  }
+  else if (x >= 0.75)
+  {
+    /* |x_app-g| < 1.2*10^-4 */     
+    return 3.00459068262159+x*(0.58669214505225+  
+      x*(0.08265573659613+x*  
+      (-0.00659920252232+x*  
+      (-0.00018118305556+x*0.00004275614526))));   
+  }
+  else if (x >= 0.0)
+  {
+    /* |x_app-g| < 4.2*10^-4 */
+    return 3.0+x*(0.6 + x*0.06857142857143);
+  }
+  else 
+  {
+    return -1.0; /* return -1 to indicate out of range error */
+  }
+}
+
+
+double n6_get_x_tilde(double x)
+{
+  if (x >= 30)
+  {
+    /* |x_app-g| < 8.4*10^-4 */
+    return x+3.0+1.5/x;
+  }
+  else if (x >= 10)
+  {
+    /* |x_app-g| < 1.5*10^-4 */      
+    return 3.46499645375252+x*(0.93732691881178+  
+      x*(0.00446754673733+x*  
+      (-0.00017581595654+x*  
+      (0.00000361245627-x*0.00000003027028))));
+  }
+  else if (x >= 0.6) 
+  {
+    /* |x_app-g| < 5*10^-4 */      
+    return 4.00472867832193+x*(0.65350902325455+  
+      x*(0.06865002972706+x*  
+      (-0.00786831776393+x*  
+      (0.00048364199777-x*0.00001230739018))));   
+  }
+  else if (x >= 0.0)
+  {
+    /* |x_app-g| < 5*10^-4 */
+    return 4.0+x*(0.66666666666667 + x*0.05555555555556);
+  }
+  else 
+  {
+    return -1.0; /* return -1 to indicate out of range error */
+  }
+}
+
+
+double n7_get_x_tilde(double x)
+{
+  if (x >= 70)
+  {
+    /* |x_app-g| < 4.5*10^-4 */
+    return x+4.0+2.0/x;
+  }
+  else if (x >= 40)
+  {
+    /* |x_app-g| < 0.6*10^-4 */      
+    return 4.14405747008275+x*(0.99602907608438+  
+      x*(0.00004850016324-x*0.00000022045779)); 
+  }
+  else if (x >= 11)
+  {
+    /* |x_app-g| < 4*10^-4 */      
+    return 4.47869926993919+x*(0.94860785388634+  
+      x*(0.00292259615961+x*  
+      (-0.00009133758382+x*  
+      (0.00000148149185-x*0.00000000974219)))); 
+  }
+  else if (x >= 0.6) 
+  {
+    /* |x_app-g| < 4*10^-4 */      
+    return 5.00163927004343+x*(0.70901380482035+  
+      x*(0.05125533094006+x*  
+      (-0.00536546089511+x*  
+      (0.00030516514924-x*0.00000722524903))));   
+  }
+  else if (x >= 0.0)
+  {
+    /* |x_app-g| < 5.7*10^-4 */
+    return 5.0+x*(0.71428571428571 + x*0.04535147392290);
+  }
+  else 
+  {
+    return -1.0; /* return -1 to indicate out of range error */
+  }
+}
+
+
+double n8_get_x_tilde(double x)
+{
+  if (x >= 70)
+  {
+    /* |x_app-g| < 7.6*10^-4 */
+    return x+5.0+2.5/x;
+  }
+  else if (x >= 40)
+  {
+    /* |x_app-g| < 1*10^-4 */     
+    return 5.17590027052522+x*(0.99519050741333+  
+      x*(0.00005850430743-x*0.00000026528982)); 
+  }
+  else if (x >= 12)
+  {
+    /* |x_app-g| < 3*10^-4 */      
+    return 5.53419940279101+x*(0.94627367528438+  
+      x*(0.00291492809572+x*  
+      (-0.00008779860942+x*  
+      (0.00000138192027-x*0.00000000886284)))); 
+  }
+  else if (x >= 0.6)
+  {
+    /* |x_app-g| < 3*10^-4 */      
+    return 6.00002229667265+x*(0.74867070852404+  
+      x*(0.03988291864924+x*  
+      (-0.00383862598095+x*  
+      (0.00020257794611-x*0.00000446469135))));   
+  }
+  else if (x >= 0.0)
+  {
+    /* |x_app-g| < 5.4*10^-4 */
+    return 6.0+x*(0.75 + x*0.0375);
+  }
+  else 
+  {
+    return -1.0; /* return -1 to indicate out of range error */
+  }
+}
+
+
+double n9_get_x_tilde(double x)
+{
+  if (x >= 80)
+  {
+    /* |x_app-g| < 9.3*10^-4 */
+    return x+6.0+3.0/x;
+  }
+  else if (x >= 40)
+  {
+    /* |x_app-g| < 2*10^-4 */      
+    return 6.19397883416807+x*(0.99509986548606+  
+      x*(0.00005491532204-x*0.00000022844072)); 
+  }
+  else if (x >= 12)
+  {
+    /* |x_app-g| < 3*10^-4 */      
+    return 6.59475392291861+x*(0.94197460473443+  
+      x*(0.00309899395860+x*  
+      (-0.00009246966411+x*  
+      (0.00000144652604-x*0.00000000923756)))); 
+  }
+  else if (x >= 0.6)
+  {
+    /* |x_app-g| < 3*10^-4 */      
+    return 6.99981765191987+x*(0.77738178743729+  
+      x*(0.03258175041333+x*  
+      (-0.00297249097430+x*  
+      (0.00015142372250-x*0.00000325954580))));   
+  }
+  else if (x >= 0.0)
+  {
+    /* |x_app-g| < 5*10^-4 */
+    return 7.0+x*(0.77777777777778 + x*0.03142536475870);
+  }
+  else 
+  {
+    return -1.0; /* return -1 to indicate out of range error */
+  }
+}
+@}
+
+
+@o likelihood_poly_app.h
+@{
+double get_x_tilde(int n, double x);
+double get_blur_tilde(int n, double x, double x_tilde);
+double n1_get_x_tilde(double x);
+double n2_get_x_tilde(double x);
+double n3_get_x_tilde(double x);
+double n4_get_x_tilde(double x);
+double n5_get_x_tilde(double x);
+double n6_get_x_tilde(double x);
+double n7_get_x_tilde(double x);
+double n8_get_x_tilde(double x);
+double n9_get_x_tilde(double x);
+@}
+
+@o py_likelihood_poly_app.c
+@{
+
+#include <Python.h>
+#include "Numeric/arrayobject.h"
+#include "likelihood_poly_app.h"
+
+static char doc_get_x_tilde[] = "x = get_x_tilde(int n, double x)\n\n"\
+" Returns x_tilde given the order n and value x. \n"\
+"It is required that n>=1 and x>=0; \n"\
+"if this is not satisfied -1 returned (otherwise x_tilde>=0).\n\n\n"\
+" Returns x_tilde given the order n and value x. \n"\
+"   In order to calculate the maximum likelihood figure-of-merit in Eq. (8) in \n"\
+"   Acta Cryst. (2002) A58, 316-326 it is required that modified integrated\n"\
+"   intensities and modified Sigma^{blur}'s are calculated.\n"\
+"\n"\
+"   Denote:\n"\
+"\n"\
+"     I - a calculated intensity from a partial model\n"\
+"     Sigma^{blur} - a calculated blur variance proportional to the sum of the\n"\
+"                    scattering factor squared of the atoms which have been\n"\
+"                    treated as the blur\n"\
+"     I-tilde - modified calculated intensity necessary for calculating Eq. (8)\n"\
+"     Sigma^{blur}-tilde - modified Sigma^{blur} again necessary for calculating Eq. (8)\n"\
+"\n"\
+"    Further introduce the dimensionless variables:\n"\
+"\n"\
+"     x          = I / Sigma^{blur}\n"\
+"     x-tilde    = I-tilde / Sigma^{blur}\n"\
+"     blur-tilde = Sigma^{blur}-tilde / (Sigma^{blur})^2\n"\
+"\n"\
+"   The functions below allow x-tilde to be calculated from x by using the\n"\
+"   get_x_tilde() for any order n, and allow blur-tilde to be calculated\n"\
+"   from x and x-tilde for any order n. To get I-tilde and Sigma^{blur}-tilde\n"\
+"   from x-tilde and blur-tilde simply use the relationships above, and\n"\
+"\n"\
+"     I-tilde            = Sigma^{blur} * x-tilde\n"\
+"     Sigma^{blur}-tilde = (Sigma^{blur})^2 * blur-tilde\n"\
+"\n"\
+"   This file was created 23/2-2005 by A.J.Markvardsen.\n";\
+
+
+static PyObject *_get_x_tilde(PyObject *dummy, PyObject *args){
+  int n;
+  double x,ret;
+  if (!PyArg_ParseTuple(args,"id",&n,&x)) return NULL;
+  /*  printf("n=%d x=%f\n",n,x); */
+  ret = get_x_tilde( n,  x);
+  /*  printf("n=%d x=%f ret=%f\n",n,x,ret);  */
+  return Py_BuildValue("f",ret);
+}
+
+static PyObject *_get_x_tilde_array(PyObject *dummy, PyObject *args){
+  PyArrayObject *n,*x,*ret;
+  int i;
+  int n_in;
+  double x_in, result;
+  if (!PyArg_ParseTuple(args,"O!O!O!",&PyArray_Type,&n, 
+                                      &PyArray_Type,&x,
+                                      &PyArray_Type, &ret)) return NULL;
+  /*  printf("n=%d x=%f\n",n,x); */
+  /* FIXME - check dimensions and type of input arrays are OK */
+   
+
+
+  for(i=0; i<n->dimensions[0]; i++){
+    n_in =(* (   int *) (n->data + i*n->strides[0]) ) ;
+    x_in =(* (double *) (x->data + i*x->strides[0]) ) ;
+    
+    result = get_x_tilde(n_in, x_in);
+    (* (double *) (ret->data + i*ret->strides[0]) ) = result;
+
+  }
+  return Py_BuildValue(""); /* None */
+}
+
+static char doc_get_blur_tilde [] = " returns blur_tilde given the order n, x and x_tilde. It is required that\n"\
+"n>=1, x>=0, x_tilde>=0. Also the return value much be >= 0, otherwise \n"\
+"something is badly wrong. \n";
+
+
+static PyObject *_get_blur_tilde( PyObject *dummy, PyObject *args){
+ int n;
+ double x,ret;
+ double x_tilde;
+ if(!PyArg_ParseTuple(args,"idd",&n,&x,&x_tilde))return NULL;
+
+ ret = get_blur_tilde(n,x,x_tilde);
+
+ return Py_BuildValue("f",ret);
+   }
+
+static struct PyMethodDef likelihood_poly_app_methods[]={
+  { "get_x_tilde",_get_x_tilde, METH_VARARGS, doc_get_x_tilde },
+  { "get_x_tilde_array",_get_x_tilde_array, METH_VARARGS, doc_get_x_tilde },
+  { "get_blur_tilde",_get_blur_tilde, METH_VARARGS, doc_get_blur_tilde }
+};
+
+
+
+void initlikelihood_poly_app(void) {
+  PyObject *m, *d, *s;
+  m = Py_InitModule("likelihood_poly_app", likelihood_poly_app_methods);
+  import_array();
+  d = PyModule_GetDict(m);
+  s = PyString_FromString("1.0");
+  PyDict_SetItemString(d, "__version__", s);
+  Py_DECREF(s);
+  s = PyString_FromString("Anders Markvardsen");
+  PyDict_SetItemString(d, "__author__", s);
+  Py_DECREF(s);
+  if (PyErr_Occurred())
+    Py_FatalError("can't initialize module likelihood_poly_app");
+}
+
+@}
+
+
 
 \chapter{Peakshapes}
 
@@ -9076,7 +10215,7 @@ from cctbx.array_family import flex
 from cctbx.xray import ext
 import cctbx
 import Numeric
-def getfcalc(peaks,s,cs=None):
+def getfcalc(peaks,s,cs=None,B=None):
    """
    peaks = hkl peak list
    s  = structure
@@ -9086,6 +10225,9 @@ def getfcalc(peaks,s,cs=None):
       sym=s.space_group().type().lookup_symbol()
       cel=s.unit_cell().parameters()
       cs=crystal.symmetry(unit_cell=cel,space_group_symbol=sym)
+   if B is not None:
+      # do something please
+      pass
    mi=flex.miller_index(peaks)
    data=flex.double((0,)*mi.size())
    ms=miller.set(cs,mi)
@@ -11320,11 +12462,12 @@ setup(name = 'profval',
       ext_modules = [m])
 
 os.system('df  /c /nodebug /fast libchol.f')              # Nasty hack - needs g77 on path 
-#os.system('ar -cr libchol.a libchol.obj')   # assume libprofval.a link compatible
 os.system('copy libchol.obj libchol.o')
+#os.system('g77 -c libchol.f -O2')
+os.system('ar -cr libchol.a libchol.o')   # assume libprofval.a link compatible
 
 n = Extension("pylibchol", sources = ['pylibchol.c'], 
-               extra_objects=['libchol.obj'], library_dirs=['.'])
+               libraries=['chol'], library_dirs=['.'])
 
 
 setup(name = 'pylibchol',
@@ -11353,6 +12496,18 @@ setup(name = 'connectedpixels',
       version = '0.1',
       description = 'connectedpixels',
       ext_modules = [module2])
+
+
+module = Extension("likelihood_poly_app", sources = 
+       ['py_likelihood_poly_app.c','likelihood_poly_app.c'])
+
+
+setup(name = 'likelihood_poly_app',
+      version = '1.0',
+      description = "Maximum likelihood for powder diffraction",
+      ext_modules = [module])
+
+
 
 @}
 
