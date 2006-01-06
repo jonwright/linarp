@@ -2274,7 +2274,7 @@ and $t=s/c$. Now, $t$ solves the quadratic:
 \[ t^2 + 2\tau t -1 = 0 \].
 \[ t = -\tau \pm \sqrt{1+\tau^2} \]
 From the smaller root we get:
-\[ c = \frac{1}{\sqrt{1+t^2} \]
+\[ c = \frac{1}{\sqrt{1+t^2}} \]
 and $s=tc$. The reason for choosing the smaller root
 was to make $\theta$ be a small angle and minimise the difference
 between the new matrix and the old one (avoiding wild oscillations).
@@ -3047,6 +3047,13 @@ class constantmodel(model):
 
 etc...
 
+\section{Array data types and units}
+
+A model is going to need to compute values (and derivatives) for a particular
+set of data.
+The units for the axes are going to be important in figuring out how to 
+build a model semi-automatically.
+
 \section{Slow but flexible models}
 
 Given the model class of the previous section, we can make
@@ -3056,27 +3063,150 @@ a sum of two things we can make a "summing" model class. This
 is initialised with the two things it is summing and 
 passes the derivatives on appropriately.
 
+\subsection{Sums}
+
 eg:
 @o summodel.py
 @{
 @< pycopyright @>
-class summodel(model):
-   def __init__(m1,m2):
+import sets
+import model
+class summodel(model.model):
+   def __init__(self,list_of_models,**kwds):
       """ Sums the two models m1 and m2 together """
-      self.nv = m1.nv + m2.nv # assume independent???
-      self.m1=m1
-      self.m2=m2
+      self.models = list_of_models
+      v = sets.Set(list_of_models[0].variables)
+      for m in models[1:]:
+         v=v.union(sets.Set(m.variables))
+      self.variables=list(v)
+      self.depends = {}
+      for v in self.variables:
+         l=[]
+         for m in self.models:
+            if v in m.variables: l.append(m)
+         self.depends[v] = l
+      #   model.model.__init__(**kwds)
+
    def compute(self,x):
-      m1yc = self.m1.compute(x) 
-      m2yc = self.m2.compute(x)
-      yc = m1yc[0]+m2yc[0]
-      iw = self.join(m1yc[1],m2yc[1]) 
-      di = self.join(m1y2[2],m2yc[2])
-   def applyshift(self,shift):
-      ???
+      [m.compute(x) for m in self.models] 
+      self.ycalc = self.models[0].ycalc
+      for m in self.models[1:]:
+         self.ycalc = self.ycalc + m.ycalc
+
+   def gradient(self,variable):
+      ml = self.depends[variable]
+      g = ml[0].gradient(variable)
+      for m in ml[1:]:
+         g = g + m.gradient(variable)
+      return g
+
+   def apply_shift(self,variable,shift):
+      ml = self.depends[variable]
+      for m in ml:
+         m.apply_shift(variable,shift)
+
+   def set_value(self,variable,value):
+      ml = self.depends[variable]
+      for m in ml:
+         m.set_value(variable,value)
+
+   def get_value(self,variable):
+      ml = self.depends[variable]
+      vl=[]
+      for m in ml:
+         vl.append(m.get_value(variable))
+      v=sets.Set(vl)
+      if len(v) != 1:
+         raise Exception("Inconsistent models!!!")
+      else:
+         return v.pop()
+      
+   def set_errorbar(self,variable,value):
+      ml = self.depends[variable]
+      for m in ml:
+         m.set_errorbar(variable,value)
+
+   def get_errorbar(self,variable):
+      ml = self.depends[variable]
+      vl=[]
+      for m in ml:
+         vl.append(m.get_errorbar(variable))
+      v=sets.Set(vl)
+      if len(v) != 1:
+         raise Exception("Inconsistent models!!!")
+      else:
+         return v.pop()
+
+   def report(self):
+      for m in self.models:
+          m.report()
+
 @}
 
-Need to make unique lists of variables somehow.
+
+
+\subsection{Product}
+
+@o productmodel.py
+@{
+@<pycopyright@>
+
+import summodel
+
+class productmodel(summodel.summodel):
+   def compute(self,x):
+      """ As for sum. but replace + with * """"
+      [m.compute(x) for m in self.models] 
+      self.ycalc = self.models[0].ycalc
+      for m in self.models[1:]:
+         self.ycalc = self.ycalc * m.ycalc
+   def gradient(self,variable):
+      """  Use the product rule  
+           d(u.v.w) = u.v.dw + u.dv.w + du.v.w
+      """
+      ml = self.depends[variable] # else dw==0
+      g = ml[0].gradient(variable) * self.ycalc / ml.ycalc
+      for m in ml[1:]:
+         g = g + m.gradient(variable) * self.ycalc / m.ycalc
+      return g
+@}
+
+\subsection{Function models?????}
+
+This model converts units. eg:
+
+\[ f(g(x)) \]
+
+If f is a peak shape function giving out computed intensity
+and g is the intensity from a list of peaks the the x variables 
+are 2theta for f and which peaks for g.
+
+
+@o functionmodel.py
+@{
+@<pycopyright@>
+
+import summodel
+
+class functionmodel(summodel.summodel):
+   def compute(self,x):
+      """ As for sum. but replace + with () """"
+
+
+   def gradient(self,variable):
+      """ Use the chain rule """
+
+@}
+
+
+\subsection{Examples}
+
+\subsubsection{Fit a series of peaks plus background}
+
+The model is:
+
+\[ y_{calc} = background + \sum_{peaks} peak.intensity * \phi(2\theta) \]
+
 
 
 \chapter{Optimisation}
@@ -3938,7 +4068,6 @@ class ichooser:
 
 @}
 
-\chapter{Maximum likelihood}
 
 \chapter{Maximum likelihood}
 
