@@ -3030,13 +3030,13 @@ of variables being used and override the compute and gradient methods.
 @o constantmodel.py
 @{
 @< pycopyright @>
-import modelclass
+import model
 import Numeric as n
-class constantmodel(model):
+class constantmodel(model.model):
    def __init__(self,**kwds):
       """ A single constant value, call constantmodel(constant=y) """
-      self.variables["constant"]
-      model.__init__(**kwds)
+      self.variables=["constant"]
+      model.model.__init__(self,**kwds)
 
    def compute(self,data):
       self.ycalc=n.ones(data.y.shape,n.Float32)*self.vv[self.vd['constant']]
@@ -3076,7 +3076,7 @@ class summodel(model.model):
       """ Sums the two models m1 and m2 together """
       self.models = list_of_models
       v = sets.Set(list_of_models[0].variables)
-      for m in models[1:]:
+      for m in list_of_models[1:]:
          v=v.union(sets.Set(m.variables))
       self.variables=list(v)
       self.depends = {}
@@ -3143,6 +3143,35 @@ class summodel(model.model):
 
 @}
 
+And now for a test case:
+
+@d testsummodel
+@{
+
+import summodel
+
+import constantmodel
+
+import powderdata
+
+import Numeric
+
+class testsummodel(unittest.TestCase):
+   def setUp(self):
+      model1 = constantmodel.constantmodel(constant=10)
+      model2 = constantmodel.constantmodel(constant=20)
+      self.model = summodel.summodel([model1,model2])
+      x=Numeric.array([1])
+      y=Numeric.array([1])
+      e=Numeric.array([1])
+      self.data = powderdata.powderdata(x,y,e,{})
+   def testvariables(self):
+      self.assertEqual(self.model.variables, ["constant"] )
+   def testycalc(self):
+      self.model.compute(self.data)
+      self.assertEqual(self.model.ycalc, 30)
+
+@}
 
 
 \subsection{Product}
@@ -12543,6 +12572,14 @@ A makefile will do everything else we want.
 
 @o Makefile -t
 @{
+
+PYTHON = /python24/python
+
+tests : linarptests.py linarp.w
+	$(PYTHON) linarptests.py      
+
+
+
 all: linarp.dvi linarp.ps linarp.pdf
 
 linarp.pdf : linarp.dvi
@@ -12560,7 +12597,7 @@ linarp.dvi : linarp.tex
 linarp.w : reference.py.out 
 	nuweb linarp
 	echo "Running python"
-	python reference.py > reference.py.out
+	$(PYTHON) reference.py > reference.py.out
 	echo "Python finished OK"
 
 linarp.tex : linarp.w
@@ -12638,6 +12675,22 @@ setup(name = 'likelihood_poly_app',
 
 
 
+@}
+
+
+\section{Testing}
+
+@o linarptests.py
+@{
+
+import unittest
+
+@< testsummodel @>
+
+
+
+if __name__ == '__main__':
+    unittest.main()
 @}
 
 
