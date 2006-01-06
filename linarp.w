@@ -39,6 +39,8 @@
 \newcommand{\mb}  [1] {\mathbf{#1}}
 
 
+
+
 \begin{document}
 
 %\marginsize{1.5cm}{1.5cm}{1.5cm}{1.5cm} % Needs anysize
@@ -12627,9 +12629,9 @@ setup(name = 'profval',
       author_email = 'wright@@esrf.fr',
       ext_modules = [m])
 
-os.system('df  /c /nodebug /fast libchol.f')              # Nasty hack - needs g77 on path 
-os.system('copy libchol.obj libchol.o')
-#os.system('g77 -c libchol.f -O2')
+#os.system('df  /c /nodebug /fast libchol.f')              # Nasty hack - needs g77 on path 
+#os.system('copy libchol.obj libchol.o')
+os.system('g77 -c libchol.f -O2')
 os.system('ar -cr libchol.a libchol.o')   # assume libprofval.a link compatible
 
 n = Extension("pylibchol", sources = ['pylibchol.c'], 
