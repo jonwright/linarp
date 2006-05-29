@@ -39,8 +39,6 @@
 \newcommand{\mb}  [1] {\mathbf{#1}}
 
 
-
-
 \begin{document}
 
 %\marginsize{1.5cm}{1.5cm}{1.5cm}{1.5cm} % Needs anysize
@@ -2583,6 +2581,31 @@ class ciimatrix:
       return sum
     
 
+class ciimatrixfromdata(ciimatrix):
+    def __init__(self,ni,Ihkl,HKL,IP,matrix,nv=0,nt=None):
+       """ Construct without a file """
+       self.ni = ni
+       self.nv = nv
+       if nt == None: 
+          self.nt = self.ni + self.nv
+       else:
+          assert nt  == self.ni + self.nv
+          self.nt = self.ni + self.nv
+       assert Ihkl.shape[0] == self.ni 
+       assert HKL.shape[0] == self.ni 
+       assert IP.shape[0]   == self.nt
+       self.Ihkl = Ihkl
+       self.HKL  = HKL
+       self.IP   = IP
+       self.matrix = matrix
+       assert self.matrix.shape[0] == self.IP[-1]
+       self.rhs=Numeric.zeros(self.nt,Numeric.Float32)
+       self.rhs[0:self.ni]=self.Ihkl
+       self.ciimat=None
+       self.L=None
+       self.damp=0.1
+       self.vecy=Numeric.zeros(self.nt,Numeric.Float32)
+
 @< sxdata @>
 
 def normalise(matrix):
@@ -3689,20 +3712,19 @@ class chooser(cii.ciimatrix):
       bottom = Numeric.dot(y,dfdi)
       if chi2 == None:
          chi2=1.
-#      print "Bottom thing = sqrt{",bottom,"/",chi2,"} making chi^2=",chi2
+      # print "Bottom thing = sqrt{",bottom,"/",chi2,"} making chi^2=",chi2
       s = 1./math.sqrt(bottom/chi2)
       self.ichosen=self.Ihkl + y*s
-#      print "In theory the chi^2 for self.ichosen should be 1 now"
-      diff = (y*s).astype(Numeric.Float32)
-      c = Numeric.dot(diff,pylibchol.fmatvec(self.realmatrix,self.IP,diff,self.nt))
-
-      if False:
-       print "It comes out as ",c
-       if abs(chi2 - c) < 0.01 :
-          print "It works, yippee!!!"
-       else:
-          raise Exception("The chooser failed you, I am sorry")
-       print "max and min chosen",Numeric.maximum.reduce(self.ichosen),Numeric.minimum.reduce(self.ichosen)
+      if __debug__:
+         print "In theory the chi^2 for self.ichosen should be",chi2,"now"
+         diff = (y*s).astype(Numeric.Float32)
+         c = Numeric.dot(diff,pylibchol.fmatvec(self.realmatrix,self.IP,diff,self.nt))
+         print "It comes out as ",c
+         if abs(chi2 - c)/chi2 < 0.01 :
+            pass
+         else:
+            raise Exception("The chooser failed you, I am sorry")
+         print "max and min chosen",Numeric.maximum.reduce(self.ichosen),Numeric.minimum.reduce(self.ichosen)
 
 @}
 
@@ -3725,6 +3747,68 @@ for i in range(10):
  
 
 @}
+
+
+\subsection{The ``choosing'' intensities optimisation problem}
+
+We have the computed intensities and other nuisance parameters
+as the variables to be optimised in the problem.
+\[  \mb{W I}_o - \frac{1}{\lambda} \frac{df(I_{c})}{d I_{c,i}} =  \mb{W I}_c \]
+The matrix W is known and $I_o$ are fixed so that we get:
+\[ \mb{I}_c = \mb{W}^{-1} \left( \mb{W I}_o - \frac{1}{\lambda} \frac{df(I_{c})}{d I_{c,i}} \right) \]
+To compute the derivative of $f$ we might have to start somewhere.
+Either it will be constant and not dependant on $I$ or we will
+have to cycle around recomputing. 
+A reasonable starting point would generally appear to be $\mb{I}_o$.
+
+Somehow the $\lambda$ parameter is going to have to be dealt with, as 
+well as the lack of existence of $\mb{W}^{-1}$. We already have a route
+to get around the lack in inverse problem with the sequential
+damped systems. Somehow we will need to vary the $\lambda$ parameter
+and make some decision about how large the perturbation is to be.
+Perhaps it can be related back to the original pattern $\chi^2$ or
+decided in some statistically meaningful sense. 
+
+The things we want then are to compute a set of $\mb{I}_c$ values
+as a function of $\lambda$. We would like to plot out the progress
+of the optimisation in terms of the fit of these values to each
+function and also plot out the variations w.r.t lambda.
+
+@o ichooser.py
+@{
+""" Chooses particular sets of integrated intensities from a CII set """
+@< pycopyright @>
+import Numeric
+class ichooser:
+   def __init__(self, ciiobject, functor, lamb):
+      """ 
+      ciiobject is the set of intensities to work with (can be diagonal!)
+      functor is the function which we use to choose - supplies f(I) and df(I)/dI
+      lambda is a weighting parameter
+      """
+      self.ciiobject=ciiobject
+      self.functor  =functor
+      self.lamb     =lamb
+      self.icalc    =ciiobject.y.copy() # initial values are Iobs
+#      self.icalc    =functor.imodel.copy() # initial values are Iobs
+      self.ciiobject.ciiobject.formchol(damp=0.5) # hack
+      self.W_Ic     =self.ciiobject.weightmatvec(self.ciiobject.y)
+
+   def cycle(self):
+      """
+      Tries to improve the Icalc set by performing a 'refinement' cycle on them
+      """
+      f , df = self.functor.compute(self.icalc)
+      rhs = self.W_Ic + df/self.lamb
+      self.ciiobject.ciiobject.nt=rhs.shape[0] # hack
+      self.icalc = self.ciiobject.ciiobject.solve(rhs,cycles=5)
+      self.f, df = self.functor.compute(self.icalc)
+      obsminuscalc=self.ciiobject.y - self.icalc
+      self.chi2=Numeric.sum(obsminuscalc * self.ciiobject.weightmatvec(obsminuscalc) )
+
+@}
+
+
 
 Now we will go through some different target functions.
 
@@ -3780,13 +3864,26 @@ The function to be optimised is
 \[ \frac{df(I(hkl))}{dI(hkl)} = 2 I(hkl) \]
 Clearly this depends on the units chosen for the intensities.
 
+The code needs to generate \code{dfdi} based on the current estimate of
+the intensities:
+
+@d sumisq
+@{
+class sumisq(functor):
+   def __init__(self):
+      pass
+   def sumisq(Ihkl):
+      self.ycalc = Ihkl*Ihkl
+      self.g = 2*Ihkl
+@}
+
 \subsection{Minimise the ``entropy'' of the intensities}
 
 A poke at the maximum entropy approach. 
 Normally entropic techniques are applied in real space with the 
 arguement that density in a map must be strictly positive 
-and normalisable.'
-Via a Fourier transform, the measured structure factors also
+and normalisable.
+Via a Fourier transform, the measured intensities also
 have to be positive and normalisable, hence the same story would
 appear to apply.
 Instead of monkeys throwing density into pixels think about the 
@@ -3798,6 +3895,26 @@ such that the integral is one.
 \[ \frac{df(I(hkl))}{dI(hkl)} = \frac{dP(I(hkl))}{dI(hkl)} (log(P(I(hkl))) + 1) \]
 If we do set the scaling to get $\sum I(hkl) = 1$ then we get:
 \[ P(I(hkl)) = \frac{I(hkl)}{\sum_{hkl} I(hkl)} \]
+and:
+\[ \frac{dP(I(hkl))}{dI(hkl)} = \frac{1}{\sum_{hkl} I(hkl)} \]
+
+@d entropyofi
+@{
+class entropyofi(functor):
+   def __init__(self):
+      pass
+   def compute(self,icalc):
+      import Numeric 
+      sumIcalc = Numeric.sum(Icalc)
+      PIcalc = Icalc / sumIcalc       # Scales I to P(I)
+      try:
+         self.ycalc = Numeric.dot(PIcalc,Numeric.log(PIcalc))
+         self.g = (Numeric.log(PIcalc)+1)/sumIcalc
+      except:
+         # Probably a negative peak
+         raise Exception("Have you got a negative intensity?")
+@}
+
 
 \subsection{Minimise an r-factor}
 
@@ -3820,7 +3937,7 @@ Cholesky decomposition, which we do not want to do!
 @{
 @< pycopyright @>
 import Numeric,math
-class rffunctor:
+class rffunctor(functor):
    def __init__(self,imodel,match=1,weights=None):
       """ R-factor perturbation function """
       self.imodel=imodel
@@ -3944,9 +4061,9 @@ and orient a molecule in a unit cell, the correlation coefficient
 can be a useful tool.
 
 From Lattman and Love~\cite{lattmanandlove1970} a function is 
-defined which is proposed to be maximised when to orientation
+defined which is proposed to be maximised when the orientation
 of a molecule matches the orientation in the unit cell. 
-They indicate that the usual approach (uses an inteference function)
+They indicate that the usual approach (uses an interference function)
 in computing a rotation function is not required since the molecular
 transform is itself bounded.
 The function is:
@@ -3973,7 +4090,7 @@ The target functor is then:
 @{
 @< pycopyright @>
 import Numeric,math
-class ccfunctor:
+class ccfunctor(functor):
    def __init__(self,imodel):
       """ Correlation coefficient perturbation function """
       self.imodel=imodel
@@ -4037,65 +4154,6 @@ if __name__=="__main__":
       print "Computes correlation coefficients for models"
       sys.exit()
    test(ciifile,cclfile,pdbfile,Asolv,Bsolv,lamb)
-
-@}
-
-\subsection{The ``choosing'' intensities optimisation problem}
-
-We have the computed intensities and other nuisance parameters
-as the variables to be optimised in the problem.
-\[  \mb{W I}_o - \frac{1}{\lambda} \frac{df(I_{c})}{d I_{c,i}} =  \mb{W I}_c \]
-The matrix W is known and $I_o$ are fixed so that we get:
-\[ \mb{I}_c = \mb{W}^{-1} \left( \mb{W I}_o - \frac{1}{\lambda} \frac{df(I_{c})}{d I_{c,i}} \right) \]
-To compute the derivative of $f$ we might have to start somewhere.
-Either it will be constant and not dependant on $I$ or we will
-have to cycle around recomputing. 
-A reasonable starting point would generally appear to be $\mb{I}_o$.
-
-Somehow the $\lambda$ parameter is going to have to be dealt with, as 
-well as the lack of existence of $\mb{W}^{-1}$. We already have a route
-to get around the lack in inverse problem with the sequential
-damped systems. Somehow we will need to vary the $\lambda$ parameter
-and make some decision about how large the perturbation is to be.
-Perhaps it can be related back to the original pattern $\chi^2$ or
-decided in some statistically meaningful sense. 
-
-The things we want then are to compute a set of $\mb{I}_c$ values
-as a function of $\lambda$. We would like to plot out the progress
-of the optimisation in terms of the fit of these values to each
-function and also plot out the variations w.r.t lambda.
-
-@o ichooser.py
-@{
-""" Chooses particular sets of integrated intensities from a CII set """
-@< pycopyright @>
-import Numeric
-class ichooser:
-   def __init__(self, ciiobject, functor, lamb):
-      """ 
-      ciiobject is the set of intensities to work with (can be diagonal!)
-      functor is the function which we use to choose - supplies f(I) and df(I)/dI
-      lambda is a weighting parameter
-      """
-      self.ciiobject=ciiobject
-      self.functor  =functor
-      self.lamb     =lamb
-      self.icalc    =ciiobject.y.copy() # initial values are Iobs
-#      self.icalc    =functor.imodel.copy() # initial values are Iobs
-      self.ciiobject.ciiobject.formchol(damp=0.5) # hack
-      self.W_Ic     =self.ciiobject.weightmatvec(self.ciiobject.y)
-
-   def cycle(self):
-      """
-      Tries to improve the Icalc set by performing a 'refinement' cycle on them
-      """
-      f , df = self.functor.compute(self.icalc)
-      rhs = self.W_Ic + df/self.lamb
-      self.ciiobject.ciiobject.nt=rhs.shape[0] # hack
-      self.icalc = self.ciiobject.ciiobject.solve(rhs,cycles=5)
-      self.f, df = self.functor.compute(self.icalc)
-      obsminuscalc=self.ciiobject.y - self.icalc
-      self.chi2=Numeric.sum(obsminuscalc * self.ciiobject.weightmatvec(obsminuscalc) )
 
 @}
 
@@ -4401,7 +4459,10 @@ $\partial \tilde{x} / \partial x$ and thus it would only cost a few
 extra CPU flops to calculate $\partial \tilde{I}^m / \partial z$ compared to
 $\partial I^m / \partial z$. 
 
-\section{Some random code}
+\section{Some code to implement this}
+
+We will make the somewhat dodgy assumption that the model weights are going to 
+be diagonal for an easier life coding.
 
 @O maxlike.py
 @{
@@ -4419,7 +4480,7 @@ class maxlike:
        """
        Data should be a correlated integrated intensity object
        Model should be a maximum likelihood model object
-       alpha is an optional float
+       alpha is an optional float for the scale factor
        """
        self.data=data
        self.model=model
@@ -4431,6 +4492,28 @@ class maxlike:
        """
        if self.alpha == None:
           self.alpha = sum(self.data.Ihkl)/sum(self.model.
+
+   def compute_S(self):
+       """
+       S = alpha^2 W^d + W^m
+
+       S will be a ciimatrix object (sparse symmetric matrix)
+       """
+       ni = self.data.Ihkl.shape[0]
+       Ihkl = self.data.Ihkl
+       HKl  = self.data.HKL
+       IP   = self.data.IP[0:ni]
+       matrix = self.alpha * self.alpha * self.data.matrix.copy()[0:IP[-1]])
+       for i in range(IP.shape[0]):
+          matrix[IP[i]] = matrix[IP[i]] + model.weight[i]
+       self.S = ciimatrixfromdata(ni,Ihkl,HKL,IP,matrix)
+
+
+   def compute_B(self):
+       """
+       B (vector) = alpha . W^d . I^d + ~W^m . ~I^m
+       """
+       self.B = self.alpha * self.data.weightmatvec(self.data.Ihkl) + self.model.weightmatvec(self.model.IHKL)
 
 
    def optimise_scale(self):
@@ -12629,9 +12712,9 @@ setup(name = 'profval',
       author_email = 'wright@@esrf.fr',
       ext_modules = [m])
 
-#os.system('df  /c /nodebug /fast libchol.f')              # Nasty hack - needs g77 on path 
-#os.system('copy libchol.obj libchol.o')
-os.system('g77 -c libchol.f -O2')
+os.system('df  /c /nodebug /fast libchol.f')              # Nasty hack - needs g77 on path 
+os.system('copy libchol.obj libchol.o')
+#os.system('g77 -c libchol.f -O2')
 os.system('ar -cr libchol.a libchol.o')   # assume libprofval.a link compatible
 
 n = Extension("pylibchol", sources = ['pylibchol.c'], 
