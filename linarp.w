@@ -1223,6 +1223,35 @@ for item in data:
       binsum=item
    lastbin=bin
 @}
+
+\subsection{Getting things out of linarp to standalones}
+
+Copying a series of files out of the linarp directory elsewhere. This is
+only really needed due to the fluid state of the things right now.
+Assumes you have a file called "depends" in the current directory.
+
+@o make.py
+@{
+import os
+LINARP_HOME = "\\wright\\linarp"
+fl=open("depends","r").readlines()
+buildit=False
+for f in fl:
+    if f.find("pyd") > -1:
+        buildit=True
+if buildit:
+    was = os.getcwd()
+    os.chdir(LINARP_HOME)
+    os.system("buildlinarp.bat")
+    os.chdir(was)
+for f in fl:
+    print "Copying",f
+    os.system("copy %s\\%s ."%(LINARP_HOME,f))
+
+@}
+
+
+
 \chapter{Input data formats}
 
 Reading raw datafiles from the many varied instruments which exist
@@ -1872,7 +1901,8 @@ C Note that the array indexing is different from that text
 C
       REAL A(*)
       DOUBLE PRECISION SUM
-      INTEGER N,IP(N)
+      INTEGER N,IP(N),BUGGER
+      BUGGER = 0
 C During this loop over 'I' we build up the Cholesky factor,
 C Get L(1,1) as a special case
       A(1)=SQRT(A(1))
@@ -1908,10 +1938,13 @@ C Guard against negative definite systems - sets sqrt(neg) to
 C be a large number - effectively adding a strong restraint to
 C the thing that blew up.
 7       IF(SUM.LT.0.0) THEN
+C This buggers you up a bit - need to flag the problem too
+          BUGGER = 1
           SUM=1.e10
         ENDIF
         A(IP(I))=SQRT(SUM)
       ENDDO
+      N=BUGGER
       RETURN
       END
 @}
@@ -2022,7 +2055,8 @@ static char fcholdc_docstring[] =
 "Assumes the problem is non-singular, with bizarre damping if it is not.\n\n"\
 "A  : Sparsely stored matrix values\n"\
 "IP : Pointers to diagonal elements (fortran indexing)\n"\
-"N  : Integer - dimension of full square matrix A and vector N in Ax=b";
+"N  : Integer - dimension of full square matrix A and vector N in Ax=b\n"\
+"Raises exception (leaky?) if matrix was negative definite\n";
 
 static PyObject * fcholdc (PyObject *self, PyObject *args){
 
@@ -2072,6 +2106,9 @@ static PyObject * fcholdc (PyObject *self, PyObject *args){
       (* (float *) (result->data + j * result->strides[0])) =
       (* (float *) (matrix->data + j * matrix->strides[0])); }
    choldc_((REAL) result->data, (INTEGER) ip->data, dim);
+   if (dim[0]!=0){
+    PyErr_SetString(PyExc_ValueError, "Cholesky is dodgy - fudged it");
+   }
 
    PyArray_XDECREF(matrix);
    Py_XDECREF(array);
@@ -2118,6 +2155,18 @@ static PyObject * fmatvec (PyObject *self, PyObject *args){
     return NULL;
    }
    /* Check types : expecting 4 byte reals and integers */
+   if (matrix->descr->type_num != PyArray_FLOAT){
+    PyErr_SetString(PyExc_ValueError, "matrix (arg1) should be Float32");
+    return NULL;
+   }
+   if (ip->descr->type_num != PyArray_INT){
+    PyErr_SetString(PyExc_ValueError, "IP (arg2) should be Int32");
+    return NULL;
+   }
+   if (x->descr->type_num != PyArray_FLOAT){
+    PyErr_SetString(PyExc_ValueError, "x (arg3) should be Float32");
+    return NULL;
+   }
 
 
    /* Make results */
@@ -2254,9 +2303,11 @@ Despite the existence of highly optmised library routines for
 solving symmetric eigenvalue problems, out of interest
 it was decided to attempt to implement a tailored sparse
 algorithm using the Jacobi method. The reasoning is that
-not only the sparse pattern if predicatable, but also the 
-magnitudes of various elements in the matrix. It is generally
-larger closer to the diagonal.
+not only the sparse pattern is predicatable, but also the 
+magnitudes of various elements in the matrix. Elements are generally
+larger closer to the diagonal. Also, for totally overlapped peaks
+a single Jacobi rotation gets a eigenvalue/eigenvector pair in 
+the null space in a single step, quickly reducing the problem size.
 
 From the book ``Matrix Computations'' by Golub and Van Loan... 
 Jacobi's idea is to apply rotations of the form $J(p,q,\theta)$
@@ -2306,6 +2357,7 @@ C using s,c
       end subroutine symshur
 @}
 
+Apply the rotation given by c,s: (fill on some details please)
 
 @d jacobirot
 @{
@@ -2318,69 +2370,377 @@ C { B_pp  B_pq }  =  { c s }^T (A) { c s }
 C { B_qp  B_qq }  =  {-s c }       {-s c }
 C
       integer lda,ldv,p,q
-      real A(lda,*),V(ldv,*),c,s
+      real A(lda,*),V(ldv,*),c,s,App,Aqq,Apq
       integer i,j,n
       real wp(lda),wq(lda)
       wp(:)=A(:,p)
       wq(:)=A(:,q)
+      App=A(p,p)
+      Apq=A(p,q)
+      Aqq=A(q,q)
       A(:,p)=c*wp-s*wq
-      A(:,q)=c*wp+s*wq
+      A(:,q)=c*wq+s*wp
       A(p,1:lda)=A(:,p)
       A(q,1:lda)=A(:,q) ! Preserve symmetry
+      A(p,p) = c*c*App+s*s*Aqq-2*s*c*Apq
+      A(q,q) = s*s*App+c*c*Aqq+2*s*c*Apq
+      A(p,q) = 0.
+      A(q,p) = 0.
 C     V(r,s) = V(r,s)
       wp=V(:,p)
       wq=V(:,q)
       V(:,p) = c*wp - s*wq
-      V(:,q) = c*wp + s*wq
+      V(:,q) = s*wp + c*wq
       end subroutine jacobirot
+@}
+
+See how we are doing on the matrix becoming diagonal
+
+@d jacobiscor
+@{
+      real function jacobiscor(A,lda)
+      integer i,j,lda
+      real A(lda,*), scor
+      scor=0.
+      do i = 1,lda
+        do j = 1,i-1
+          scor = scor + A(i,j)*A(i,j)
+       enddo
+      enddo
+      jacobiscor=scor
+      return
+      end function jacobiscor
 @}
 
 @o jacobitest.f
 @{
 @< symshur @>
 @< jacobirot @>
-      program jacobi
-      real A(10,10),V(10,10)
-      integer i,p,q
-      real c,s
-      data A/10, 9, 8, 0, 0, 0, 0, 0, 0, 0,
-     +        9,10, 9, 8, 0, 0, 0, 0, 0, 0,
-     +        8, 9,10, 9, 8, 0, 0, 0, 0, 0,
-     +        0, 8, 9,10, 9, 8, 0, 0, 0, 0,
-     +        0, 0, 8, 9,10, 9, 8, 0, 0, 0,
-     +        0, 0, 0, 8, 9,10, 9, 8, 0, 0,
-     +        0, 0, 0, 0, 8, 9,10, 9, 8, 0,
-     +        0, 0, 0, 0, 0, 8, 9,10, 9, 8,
-     +        0, 0, 0, 0, 0, 0, 8, 9,10, 9,
-     +        0, 0, 0, 0, 0, 0, 0, 8, 9,10 /
-      V=0.
-      do i = 1,10
+@< jacobiscor @>
+      subroutine make_av(A,lda,V,ldv)
+      integer i, lda, ldv
+      real a(lda,*), v(ldv,*)
+      A(1:lda,1:lda)=0.
+      do i = 1,lda
+        A(i,i)=10.+i
+      enddo      
+      do i = 1,lda-1
+        A(i,i+1)=9.
+        A(i+1,i)=9.
+      enddo      
+      V(1:ldv,1:ldv)=0.
+      do i = 1,lda-2
+        A(i,i+2)=6.
+        A(i+2,i)=6.
+      enddo      
+      do i = 1,ldv
         V(i,i)=1.
       enddo
-      p=4
-      q=5
-C      do i=1,10
-C       do p=1,10
-C        do q=p+1,10
-          call symshur(A,10,p,q,c,s)
-          call jacobirot(A,10,V,10,p,q,c,s)
-C        enddo
-C      enddo
-C      enddo
+      end subroutine make_av
+      program jacobi
+      implicit none
+      integer m
+      parameter (m=10)
+      real A(m,m),V(m,m),jacobiscor,tol
+      integer i,p,q,j,ncall
+      real c,s,scor
+      tol=1e-10
+      call make_av(a,m,v,m)
       write(*,*)"A"
-      do i = 1,10
-         write(*,*)A(i,:)
+      do i=1,m
+       write(*,"(10i3)")(int(A(i,j)),j=1,m)
       enddo
-      write(*,*)"V"
-      do i = 1,10
-         write(*,*)V(i,:)
+      p=1;q=3
+      call symshur(A,m,p,q,c,s)
+      call jacobirot(A,m,V,m,p,q,c,s)
+      write(*,*)"A"
+      do i=1,m
+       write(*,"(10i3)")(int(A(i,j)),j=1,m)
       enddo
+      p=1;q=3
+      call symshur(A,m,p,q,c,s)
+      call jacobirot(A,m,V,m,p,q,c,s)
+      write(*,*)"A"
+      do i=1,m
+       write(*,"(10i3)")(int(A(i,j)),j=1,m)
+      enddo
+      p=3;q=6
+      call symshur(A,m,p,q,c,s)
+      call jacobirot(A,m,V,m,p,q,c,s)
+      write(*,*)"A"
+      do i=1,m
+       write(*,"(10i3)")(int(A(i,j)),j=1,m)
+      enddo
+      p=2;q=6
+      call symshur(A,m,p,q,c,s)
+      call jacobirot(A,m,V,m,p,q,c,s)
+      write(*,*)"A"
+      do i=1,m
+       write(*,"(10i3)")(int(A(i,j)),j=1,m)
+      enddo
+      stop
+      ncall=0
+      do i=1,5
+       write(*,*)"Sweep ",i," scores ",jacobiscor(A,m),ncall
+       do p=1,m
+        do q=p+1,m
+         if (abs(A(p,q)).gt.tol) then
+          call symshur(A,m,p,q,c,s)
+          call jacobirot(A,m,V,m,p,q,c,s)
+          ncall=ncall+1
+         endif
+        enddo
+       enddo
+      enddo
+      write(*,*)"ncalls =",ncall
+      ncall=0
+      write(*,*)"Different sweep order"
+      call make_av(a,m,v,m)
+      do i=1,5
+       write(*,*)"Sweep ",i," scores ",jacobiscor(A,m),ncall
+       do j=1,m-1
+         do p=1,m-j
+         q=p+j
+         if (abs(A(p,q)).gt.tol) then
+          call symshur(A,m,p,q,c,s)
+          call jacobirot(A,m,V,m,p,q,c,s)
+          ncall=ncall+1
+         endif
+         enddo
+       enddo
+      enddo
+      write(*,*)"ncalls",ncall
       stop
       end program jacobi
 @}
     
-o jacobitest.py
 
+\subsection{LAPACK band matrices}
+
+Well all that last section was a load of rubbish, or at least 
+I failed to get it working. Went instead for the LAPACK SSBEV
+routine:
+
+The python/c wrapper:
+@O ssbev_module.c
+@{
+
+#include <Python.h>                  /* To talk to python */
+#include "Numeric/arrayobject.h"     /* Access to Numeric */
+
+
+static char _ssbev_docstring[] =\
+"GET THE ARGS RIGHT FROM PYTHON PLEASE - SORRY\n"\
+"          SUBROUTINE SSBEV( JOBZ, UPLO, N, KD, AB, LDAB, W, Z, LDZ, WORK,\n"\
+"     $                  INFO )\n"\
+"*\n"\
+"*  -- LAPACK driver routine (version 3.0) --\n"\
+"*     Univ. of Tennessee, Univ. of California Berkeley, NAG Ltd.,\n"\
+"*     Courant Institute, Argonne National Lab, and Rice University\n"\
+"*     June 30, 1999\n"\
+"*\n"\
+"*     .. Scalar Arguments ..\n"\
+"      CHARACTER          JOBZ, UPLO\n"\
+"      INTEGER            INFO, KD, LDAB, LDZ, N\n"\
+"*     ..\n"\
+"*     .. Array Arguments ..\n"\
+"      REAL               AB( LDAB, * ), W( * ), WORK( * ), Z( LDZ, * )\n"\
+"*     ..\n"\
+"*\n"\
+"*  Purpose\n"\
+"*  =======\n"\
+"*\n"\
+"*  SSBEV computes all the eigenvalues and, optionally, eigenvectors of\n"\
+"*  a real symmetric band matrix A.\n"\
+"*\n"\
+"*  Arguments\n"\
+"*  =========\n"\
+"*\n"\
+"*  JOBZ    (input) CHARACTER*1\n"\
+"*          = 'N':  Compute eigenvalues only;\n"\
+"*          = 'V':  Compute eigenvalues and eigenvectors.\n"\
+"*\n"\
+"*  UPLO    (input) CHARACTER*1\n"\
+"*          = 'U':  Upper triangle of A is stored;\n"\
+"*          = 'L':  Lower triangle of A is stored.\n"\
+"*\n"\
+"*  N       (input) INTEGER\n"\
+"*          The order of the matrix A.  N >= 0.\n"\
+"*\n"\
+"*  KD      (input) INTEGER\n"\
+"*          The number of superdiagonals of the matrix A if UPLO = 'U',\n"\
+"*          or the number of subdiagonals if UPLO = 'L'.  KD >= 0.\n"\
+"*\n"\
+"*  AB      (input/output) REAL array, dimension (LDAB, N)\n"\
+"*          On entry, the upper or lower triangle of the symmetric band\n"\
+"*          matrix A, stored in the first KD+1 rows of the array.  The\n"\
+"*          j-th column of A is stored in the j-th column of the array AB\n"\
+"*          as follows:\n"\
+"*          if UPLO = 'U', AB(kd+1+i-j,j) = A(i,j) for max(1,j-kd)<=i<=j;\n"\
+"*          if UPLO = 'L', AB(1+i-j,j)    = A(i,j) for j<=i<=min(n,j+kd).\n"\
+"*\n"\
+"*          On exit, AB is overwritten by values generated during the\n"\
+"*          reduction to tridiagonal form.  If UPLO = 'U', the first\n"\
+"*          superdiagonal and the diagonal of the tridiagonal matrix T\n"\
+"*          are returned in rows KD and KD+1 of AB, and if UPLO = 'L',\n"\
+"*          the diagonal and first subdiagonal of T are returned in the\n"\
+"*          first two rows of AB.\n"\
+"*\n"\
+"*  LDAB    (input) INTEGER\n"\
+"*          The leading dimension of the array AB.  LDAB >= KD + 1.\n"\
+"*\n"\
+"*  W       (output) REAL array, dimension (N)\n"\
+"*          If INFO = 0, the eigenvalues in ascending order.\n"\
+"*\n"\
+"*  Z       (output) REAL array, dimension (LDZ, N)\n"\
+"*          If JOBZ = 'V', then if INFO = 0, Z contains the orthonormal\n"\
+"*          eigenvectors of the matrix A, with the i-th column of Z\n"\
+"*          holding the eigenvector associated with W(i).\n"\
+"*          If JOBZ = 'N', then Z is not referenced.\n"\
+"*\n"\
+"*  LDZ     (input) INTEGER\n"\
+"*          The leading dimension of the array Z.  LDZ >= 1, and if\n"\
+"*          JOBZ = 'V', LDZ >= max(1,N).\n"\
+"*\n"\
+"*  WORK    (workspace) REAL array, dimension (max(1,3*N-2))\n"\
+"*\n"\
+"*  INFO    (output) INTEGER\n"\
+"*          = 0:  successful exit\n"\
+"*          < 0:  if INFO = -i, the i-th argument had an illegal value\n"\
+"*          > 0:  if INFO = i, the algorithm failed to converge; i\n"\
+"*                off-diagonal elements of an intermediate tridiagonal\n"\
+"*                form did not converge to zero.\n"\
+"*\n"\
+"*  =====================================================================\n"\
+"\n";
+
+#define SDATA(p) ((float *) (((PyArrayObject *)p)->data))
+
+#define DEBUG 0
+static PyObject * _ssbev (PyObject *self, PyObject *args,  PyObject *keywds)
+{
+    char jobz, uplo;
+    int n, kd, ldz, info, ldab, i, j;
+    PyArrayObject *ab=NULL, *w=NULL, *z=NULL, *work=NULL;
+
+    if(!PyArg_ParseTuple(args, "cciiO!iO!O!iO!",
+                &jobz, &uplo, &n, &kd,
+                &PyArray_Type, &ab,
+                &ldab,
+                &PyArray_Type, &w,
+                &PyArray_Type, &z,
+                &ldz,
+                &PyArray_Type, &work))
+        return NULL; /* if bad */
+    /* Check the args ?? */
+    info=0;
+    if(DEBUG)
+    printf("%c %c %d %d %f %d %f %f %d %f %d OK\n", jobz, uplo, n, kd,
+            *(float *) ab->data, ldab, *(float *) w->data, *(float *) z->data,
+            ldz, *(float *) work->data, info);
+    if(DEBUG)    
+    printf("ab dims %d %d strides %d %d\n",ab->dimensions[0],ab->dimensions[1],
+            ab->strides[0],ab->strides[1]);
+    if(DEBUG)
+    for(i=0; i< ab->dimensions[0]; i=i+1)
+       for(j=0; j< ab->dimensions[1]; j=j+1)
+          printf("%d %d %d %f\n",i,j,i*ab->strides[0]+j*ab->strides[1],
+                  *(float *) (ab->data+i*ab->strides[0]+j*ab->strides[1]));
+                  
+    ssbev_(&jobz, &uplo, &n, &kd, SDATA(ab), &ldab, 
+            SDATA(w), SDATA(z), &ldz, SDATA(work) , &info);
+    if(DEBUG) 
+    printf("info=%d\n",info);
+    return Py_BuildValue("i",info);
+}
+
+static PyMethodDef _ssbevMethods[] = {
+    {"_ssbev", (PyCFunction) _ssbev, METH_VARARGS, _ssbev_docstring },
+    {NULL, NULL, 0, NULL} /* Sentinel */
+};
+
+void init_ssbev(void){
+    PyObject *m, *d;
+    m=Py_InitModule("_ssbev",_ssbevMethods);
+    import_array();
+    d=PyModule_GetDict(m);
+}
+
+        
+@}
+
+
+And now the setup file:
+
+@o setupssbev.py
+@{
+# You need to build lapack/blas etc I77 and F77 are from clapack, sorry
+    
+from distutils.core import setup, Extension
+e = Extension("_ssbev", sources=['ssbev_module.c'], libraries=['lapack', 'f77blas' ,'atlas', 'I77','F77'])
+setup(name='ssbev',
+      version='0.0.1',
+      author='Jon Wright',
+      author_email='wright@@esrf.fr',
+      description='ssbev',
+      license = "GPL",
+      py_modules = ["ssbev"],
+      ext_modules = [e])
+@}
+
+And finally the python interface
+@o ssbev.py
+@{
+
+import Numeric 
+import _ssbev
+
+__doc__=_ssbev._ssbev.__doc__
+
+def ssbev_vecs(a):
+    assert a.typecode() == Numeric.Float32
+    # assert a is flat (matches fortran order)
+    JOBZ = 'V'
+    UPLO = 'L'
+    N = a.shape[0]
+    KD = a.shape[1]-1
+    assert a[:-1] == Numeric.zeros(a.shape[1],Numeric.Float32)
+    AB = a
+    LDAB = a.shape[1]
+    assert LDAB >= KD+1
+    assert N >= KD
+    W = Numeric.zeros(N,Numeric.Float32)
+    Z = Numeric.zeros((N,N),Numeric.Float32)
+    LDZ = N
+    WORK = Numeric.zeros(3*N,Numeric.Float32)
+    # INFO is output
+    info = _ssbev._ssbev(JOBZ, UPLO, N, KD, AB, LDAB, W, Z, LDZ, WORK)
+    if info != 0:
+        raise Exception("Problem in ssbev_vecs")
+    return W, Z
+
+def test1():
+    a = [ [ 10, 10, 10, 10, 10, 10, 10, 10, 10, 10 ] ,
+          [  9,  9,  9,  9,  9,  9,  9,  9,  9,  0 ] ,
+          [  8,  8,  8,  8,  8,  8,  8,  8,  0,  0 ] ,
+          [  0,  0,  0,  0,  0,  0,  0,  0,  0,  0 ] ]
+    a = Numeric.array(Numeric.transpose(a).astype(Numeric.Float32),Numeric.Float32)
+    print a
+    print a.shape
+    e1, v1 = ssbev_vecs(a)
+
+    b = Numeric.identity(10,Numeric.Float32)*10
+    for i in range(9): b[i,i+1] = b[i+1,i] = 9.
+    for i in range(8): b[i,i+2] = b[i+2,i] = 8.
+    import LinearAlgebra
+    e2, v2 = LinearAlgebra.Heigenvectors(b)
+    
+    assert abs(e1 - e2) < Numeric.ones(10,Numeric.Float32)*1e-6
+    print e1
+
+if __name__=="__main__":
+    test1()
+@}
 
 
 \section{Python wrapper}
@@ -2422,17 +2782,20 @@ with something else and get the rest of the functionality.
            print items
            print "Sorry - problems interpreting your file"
            sys.exit()
+      # Really???
+      self.IP=self.IP.astype(Numeric.Int32)
       self.rhs=Numeric.zeros(self.nt,Numeric.Float32)
       self.rhs[0:self.ni]=self.Ihkl
       for i in range(self.nv):
          items=f.readline().split()
          self.IP[self.ni+i]=int(items[1])
       print f.readline(),   
-      self.matrix=Numeric.zeros(self.IP[-1],Numeric.Float32)
+      self.matrix=Numeric.zeros(self.IP[-1],Numeric.Float)
       self.matrix[0]=float(f.readline())
       for i in range(1,self.IP[-1]):
          self.matrix[i]=float(f.readline())
       f.close()
+      self.matrix=self.matrix.astype(Numeric.Float32)
       print "Number of entries in matrix",self.IP[-1]
       print "Number of intensities=",self.ni,"Total vars",self.nt
       print "Percentage full=",self.IP[-1]*100.0/self.ni/self.ni
@@ -2456,14 +2819,19 @@ import pylibchol
 class ciimatrix:
 @< ciiconstructor @>
 
-   def makesquare(self):
+   def makesquare(self,dim=None):
       """
       Produces a dense square matrix from the sparse one
       which is produced by the refinement program
       """
-      mat=Numeric.zeros((self.nt,self.nt),Numeric.Float32,savespace=1)
+      if dim is None:
+         dim=self.nt
+      if dim>self.nt:
+         # Tell the user with exception? TODO
+         dim=self.nt
+      mat=Numeric.zeros((dim,dim),Numeric.Float32,savespace=1)
       mat[0,0]=self.matrix[0]
-      for i in range(1,self.nt):
+      for i in range(1,dim):
         j=0
         while (self.IP[i]-j) > self.IP[i-1]:
            try:
@@ -2471,9 +2839,11 @@ class ciimatrix:
               mat[i,i-j]=self.matrix[self.IP[i]-j-1]
               j+=1
            except IndexError:
-              print i,j,self.IP[i],self.IP[i-1],\
-                ciimat.shape,matrix.shape,self.IP[i]-j,i-j
-              print "Trouble making a square matrix from the sparse one"
+              linarp.logging.error(str((i,j,self.IP[i],self.IP[i-1],\
+                ciimat.shape,matrix.shape,self.IP[i]-j,i-j)))
+              linarp.logging.error("(i,j,self.IP[i],self.IP[i-1],\
+                ciimat.shape,matrix.shape,self.IP[i]-j,i-j)")
+              linarp.logging.error("Trouble making a square matrix from the sparse one")
               sys.exit()
       return mat
 
@@ -2523,25 +2893,44 @@ class ciimatrix:
       """
       if self.L==None: self.formchol()
       sol=pylibchol.fsolve(self.L,self.IP,vec.astype(Numeric.Float32),self.nt)
+      linarp.logging.debug("cii.py.solve:sol.typecode() %s"%(sol.typecode()))
+      linarp.logging.debug("cii.py.solve:initial_sol max/min: %f %f\n"%\
+             (Numeric.maximum.reduce(sol),Numeric.minimum.reduce(sol)))
       if cycles==0 and positive==0:
          return sol
       if cycles==0:
-         return Numeric.where(sol>0.,sol,0.)
+         return Numeric.where(sol>0.,sol,0.).astype(Numeric.Float32)
       for i in range(cycles):
          # truncate
          if positive!=0:
-            sol=Numeric.where(sol>0., sol, 0.)
-         err=vec-pylibchol.fmatvec(self.realmatrix,self.IP,sol,self.nt)
+            sol=Numeric.where(sol>0., sol, 0.).astype(Numeric.Float32)
+            linarp.logging.debug("cii.py.solve:sol.typecode() %s"%(sol.typecode()))
+         linarp.logging.debug("cii.py.solve:max/min realmatrix: %f %f\n"%\
+             (Numeric.maximum.reduce(self.realmatrix),Numeric.minimum.reduce(self.realmatrix)))
+         estimate = pylibchol.fmatvec(self.realmatrix,self.IP,sol.astype(Numeric.Float32),self.nt)
+         estimate = pylibchol.fmatvec(self.matrix,self.IP,sol.astype(Numeric.Float32),self.nt)
+         err=vec-estimate
+         x = Numeric.argmax(err)
+         n = Numeric.argmin(err)
+         linarp.logging.debug("cii.py.solve:err max/min %f %f"%(err[x],err[n]))
+         linarp.logging.debug("cii.py.solve:sol max/min %f %f"%(sol[x],sol[n]))
+         linarp.logging.debug("cii.py.solve:estimate max/min %f %f"%(estimate[x],estimate[n]))
          sol=sol+pylibchol.fsolve(self.L,self.IP,err.astype(Numeric.Float32),self.nt)
+         linarp.logging.debug("cii.py.solve:sol max/min: %f %f\n"%\
+                (Numeric.maximum.reduce(sol),Numeric.minimum.reduce(sol)))
+         linarp.logging.debug("cii.py.solve:sol.typecode() %s"%(sol.typecode()))
       if positive!=0:
-         return Numeric.where(sol>0.,sol,0.)
+         return Numeric.where(sol>0.,sol,0.).astype(Numeric.Float32)
       else:
          return sol   
+
    def formchol(self,damp=None):
       """
       Forms Cholesky decomposition in self.L
       """
       self.mask=Numeric.ones(self.nt,Numeric.Float32)
+      assert self.matrix.typecode() == Numeric.Float32
+      self.realmatrix=self.matrix.copy().astype(Numeric.Float32)
       if damp==None:
          m=self.matrix
       else:
@@ -2551,10 +2940,9 @@ class ciimatrix:
                 # print i,self.IP[i],m[self.IP[i]-1]
                 m[self.IP[i]-1]=1.0
                 self.mask[i]=0.
-            m[self.IP[i]-1]*=(1.0+damp)
+            m[self.IP[i]-1]=m[self.IP[i]-1]*(1.0+damp)
       self.damp=damp
-      self.realmatrix=m.copy()
-      self.L=pylibchol.fcholdc(m,self.IP,self.nt)
+      self.L=pylibchol.fcholdc(m.astype(Numeric.Float32),self.IP,self.nt)
 
    def sparsechi2(self,vec):
       """
@@ -2579,7 +2967,41 @@ class ciimatrix:
       sum=Numeric.dot(omc,Numeric.dot(mat,omc))
 #      print sum, sum/self.nt, math.sqrt(sum/self.nt)
       return sum
-    
+
+   def makebanded(self,dim=None):
+      """
+      Make a banded matrix for eigenvector/eigenvalue routines
+      """
+      # find longest row
+      len=1
+      if dim is None:
+         n=self.nt
+      else:
+         n = min(self.nt,dim)
+      print "n",n
+      for i in range(1,n):
+         if self.IP[i]-self.IP[i-1] > len:
+             len=self.IP[i]-self.IP[i-1]
+      # len now contains the width
+      # MUST have ONE bigger for passing to lapack!
+      rect = Numeric.zeros((dim,len+1),Numeric.Float32)
+      rect[0,0]=self.matrix[0]
+      for i in range(1,n):
+        j=0 # diagonal
+        while (self.IP[i]-j) > self.IP[i-1]:
+           try:
+              p=i 
+              q = i-j
+              rect[q,p-q]=self.matrix[self.IP[i]-j-1]
+           except:
+              print "Problem in makebanded",p,q,rect.shape
+              raise
+           j+=1
+      return rect
+#*          if UPLO = 'U', AB(kd+1+p-q,q) = A(p,q) for max(1,j-kd)<=p<=q;
+#*          if UPLO = 'L', AB(1+p-q,q)    = A(p,q) for q<=p<=min(n,q+kd).
+
+      
 
 class ciimatrixfromdata(ciimatrix):
     def __init__(self,ni,Ihkl,HKL,IP,matrix,nv=0,nt=None):
@@ -2799,7 +3221,8 @@ import Numeric as n
 import ciidata,cii
 from math import cos,pi
 from LinearAlgebra import inverse   
-import cctbxfcalc  # For a set of fcalc numbers
+# Next line apparently not used
+# import cctbxfcalc  
 
 class solventrefinedata(ciidata.ciidata):
    def __init__(self,dilsfile, cclfile):
@@ -2865,27 +3288,380 @@ e = ms.epsilons()
 
 np = e.data().size()    # Number of epsilons
 
+n_c = 500
+n_n = 200
+n_o = 200
+n_s = 2
+n_h = 100
 
+# Get scattering factors
 
+# C, N, O, S, H
+import cctbx.eltbx.xray_scattering
+C = cctbx.eltbx.xray_scattering.it1992("C")
+N = cctbx.eltbx.xray_scattering.it1992("N")
+O = cctbx.eltbx.xray_scattering.it1992("O")
+S = cctbx.eltbx.xray_scattering.it1992("S")
+H = cctbx.eltbx.xray_scattering.it1992("H")
+
+scattering_factors = Numeric.zeros((mydata.ciiobject.HKL.shape[0],5), Numeric.Float)
+from math import sqrt
 # We want intensity divided by epsilon
-
-for i in range(30): #np):
+print "# ( h k l ) stol2 eps I I/eps E"
+for i in range(np): #np):
    hkl = e.indices()[i]
    eps = e.data()[i]
    obsI= mydata.ciiobject.Ihkl[i]
    dhkl= mydata.ciiobject.HKL[i]
+   stol2 = mydata.sinthetaoverlambda2(i)
+   c = C.fetch().at_stol_sq(stol2)
+   n = N.fetch().at_stol_sq(stol2)
+   o = O.fetch().at_stol_sq(stol2)
+   s = S.fetch().at_stol_sq(stol2)
+   h = H.fetch().at_stol_sq(stol2)
+   sum_scat_sq = n_c * c * c + \
+                 n_n * n * n + \
+                 n_o * o * o + \
+                 n_s * s * s + \
+                 n_h * h * h
+   E = sqrt(obsI) / (sqrt(eps * sum_scat_sq))
    assert dhkl == hkl
-   print hkl,dhkl,eps,obsI,obsI/eps
+   print "(",hkl[0],hkl[1],hkl[2],")",stol2,eps,obsI,obsI/eps,E
 
-binner=ms.setup_binner(reflections_per_bin=50)
+   
 
-binner.show_summary()
+
+@}
+
+
+\section{A model object}
+
+A model for use in maximum likelihood calculations.
+
+@O wilsonmodel.py
+@{
+
+import Numeric, cctbx, math
+from cctbx import miller,crystal
+from cctbx.array_family import flex
+
+
+class wilsonmodel:
+    def __init__(self,space_group_symbol):
+        self.composition = { "C" : 613 ,
+                             "N" : 193 ,
+                             "O" : 185 , 
+                             "S" : 10  ,
+                             "H" : 100 }
+        self.table={}
+        self.scale = 1e-3
+        self.B = 15.
+        import cctbx.eltbx.xray_scattering
+        for key in self.composition.keys():
+            self.table[key] = cctbx.eltbx.xray_scattering.it1992(key).fetch().at_stol_sq
+        self.space_group_symbol = space_group_symbol
+
+    def tfac(self,stol2):
+        return math.exp(-stol2*self.B)
+
+    def set_hkls(self,hkls):
+        self.mi = flex.miller_index(hkls)
+        self.ycalc = Numeric.zeros(len(hkls),Numeric.Float)
+        self.weight = Numeric.zeros(len(hkls),Numeric.Float)
+
+    def compute(self,data):
+        self.ms = miller.set(  crystal.symmetry( unit_cell = data.unitcellpars,
+                                                 space_group_symbol = self.space_group_symbol ), 
+                               self.mi )
+        e = self.ms.epsilons()
+        e_hkls = e.indices()
+        e_eps  = e.data()
+        e_centric = self.ms.centric_flags().data()
+        for i in range(data.ciiobject.ni):
+            stol2 = data.sinthetaoverlambda2(i)
+            hkl = e_hkls[i]
+            eps = e_eps[i]
+            assert data.ciiobject.HKL[i] == hkl
+            sum_scat_sq = 0.
+            for key in self.table.keys(): 
+                f = self.table[key](stol2)
+                sum_scat_sq = sum_scat_sq + self.composition[key]*f*f
+            # E = 1
+            if e_centric[i]:
+                E=1.
+            else:
+                E=1.
+            self.ycalc[i] = E * eps * sum_scat_sq * self.scale * self.tfac(stol2)
+            self.weight[i] = 0.05/self.ycalc[i]
+
+    def weightmatvec(self,vec):
+        try:
+            return vec * self.weight
+        except:
+            print vec.shape,self.weight.shape
+            raise
+         
+@}
+
+\section{Solvated Wilson model}
+
+This is the same idea as the Wilson plot model but includes two 
+sets of atoms - one with a large thermal factor and one with a 
+small thermal factor.
+
+
+@O solvatedwilson.py
+@{
+import wilsonmodel
+import cctbx
+import math
+from math import sin, cos
+class solvatedwilsonmodel(wilsonmodel.wilsonmodel):
+   def __init__(self,space_group_symbol,B_solv=100,frac=0.85):
+       wilsonmodel.wilsonmodel.__init__(self,space_group_symbol)
+       sum_scat_sq = 0.
+       for key in self.table.keys():
+           f = self.table[key](0.0)
+           sum_scat_sq = sum_scat_sq + self.composition[key]*f*f
+       self.B_solv = B_solv 
+       f = self.solv(0.0)
+       ns =  -frac*sum_scat_sq/f/f
+       self.composition["Solvent"] = ns
+       self.table["Solvent"] = self.solv
+       print self.composition
+
+   def solv(self,stol2):
+       """
+       Solvent contribution (defaults to negative!!)
+       """
+       tfac = math.exp(-stol2*self.B_solv/8)
+       if stol2 == 0. : 
+           return 1.
+       else:
+           cyl = 3*(sin(stol2)-stol2*cos(stol2))/stol2/stol2/stol2
+       return tfac*cyl
+
+def test(model=None):
+    smax=0.12
+    smin=0.
+    print "in test wilson",
+    if model is None:
+        m = solvatedwilsonmodel("P1",frac=frac)
+    else:
+        m = model
+    print m.scale,m.tfac(0.),m.tfac(0.1)
+    from matplotlib.pylab import *
+    for frac in arange(0.5,0.9,0.05):
+        s=[]
+        solv = []
+        nosol= []
+        for i in range(100):
+            stol2 = smin+i*(smax-smin)/100.
+            s.append(stol2)
+            sum_scat_sq = 0.
+            sum_scat_sq_ns = 0.
+            for key in m.table.keys():
+                f = m.table[key](stol2)
+                sum_scat_sq = sum_scat_sq + m.composition[key]*f*f
+                if key is not "Solvent":
+                    sum_scat_sq_ns = sum_scat_sq_ns + m.composition[key]*f*f
+            solv.append(sum_scat_sq*m.scale*m.tfac(stol2))
+            nosol.append(sum_scat_sq_ns*m.scale*m.tfac(stol2))
+        plot(s,solv,label="%.3f"%(frac))           
+    legend()
+    show()
+
+
+
+if __name__=="__main__":
+   test()
+@}
+
+\section{Sinc function wilson model}
+
+Much as for the previous case but now we model the contributions
+from the solvent as a sinc function (see Morris et al, Acta D60 (2004) 227).
+
+
+@O sincwilson.py
+@{
+import wilsonmodel
+import cctbx
+import math
+from math import sin, cos
+class sincwilsonmodel(wilsonmodel.wilsonmodel):
+   def __init__(self,space_group_symbol,B_solv=100,frac=0.40):
+       wilsonmodel.wilsonmodel.__init__(self,space_group_symbol)
+       sum_scat_sq = 0.
+       for key in self.table.keys():
+           f = self.table[key](0.0)
+           sum_scat_sq = sum_scat_sq + self.composition[key]*f*f
+       self.B_solv = B_solv 
+       f = self.solv(0.0)
+       # NOTE - THIS IS POSITIVE!!!
+       ns =  frac*sum_scat_sq/f/f
+       self.composition["Solvent"] = ns
+       self.table["Solvent"] = self.solv
+       print self.composition
+       self.dist=2.76
+
+   def solv(self,stol2):
+       """
+       Solvent contribution (defaults to negative!!)
+       """
+       tfac = math.exp(-stol2*self.B_solv/8)
+       if stol2 == 0. : 
+           return 1.
+       else:
+           x = 4*pi*sqrt(stol2)*self.dist 
+           sinc = sin(x)/x
+       return tfac*sinc
+
+if __name__=="__main__":
+    smax=0.12
+    smin=0.
+    from matplotlib.pylab import *
+    for frac in arange(0.0,10.,0.1):
+        s=[]
+        solv = []
+        nosol= []
+        m = sincwilsonmodel("P1",frac=frac)
+        for i in range(100):
+            stol2 = smin+i*(smax-smin)/100.
+            s.append(stol2)
+            sum_scat_sq = 0.
+            sum_scat_sq_ns = 0.
+            for key in m.table.keys():
+                f = m.table[key](stol2)
+                sum_scat_sq = sum_scat_sq + m.composition[key]*f*f
+                if key is not "Solvent":
+                    sum_scat_sq_ns = sum_scat_sq_ns + m.composition[key]*f*f
+            solv.append(sum_scat_sq)
+            nosol.append(sum_scat_sq_ns)
+        plot(s,log(solv),label="%.3f"%(frac))           
+    legend()
+    show()
 
 @}
 
 
 
 
+\section{Form factor free Wilson model, epsilon only}
+
+Due to the problems of modelling the form factor with solvent in
+the structure one idea is to just make the $E$ values average to
+one in resolution bins. 
+Also this means we don't have to worry about the overall temperature
+factor.
+To make this so we need to add up the intensity coming from a series 
+of peaks, but adding up all of the intensity, so multiplying by the 
+multiplicity.
+
+Two things are needed, first a way of cutting up into resolution bins 
+and secondly a way of getting the sum of the intensity in the bin.
+
+@O wilsonepsilon.py
+@{
+import Numeric, cctbx, math
+from cctbx import miller,crystal
+from cctbx.array_family import flex
+import wilsonmodel
+
+class wilsonepsilon(wilsonmodel.wilsonmodel):
+    def __init__(self,space_group_symbol,nbins):
+        self.space_group_symbol = space_group_symbol
+        self.nbins = nbins
+        self.scale = 1.0
+
+    def set_hkls(self,hkls):
+        self.mi = flex.miller_index(hkls)
+        self.ycalc = Numeric.zeros(len(hkls),Numeric.Float)
+        self.weight = Numeric.zeros(len(hkls),Numeric.Float)
+
+    def get_value(self,name):
+        if name == "scale":
+           return float(self.scale)
+        raise Exception("Unknown parameter "+name)
+
+    def set_value(self,name,value):
+        if name == "scale":
+           self.scale = float(value)
+           return
+        raise Exception("Unknown parameter "+name)
+
+
+    def compute(self,data):
+        self.ms = miller.set(  crystal.symmetry( unit_cell = data.unitcellpars,
+                                                 space_group_symbol = self.space_group_symbol ), 
+                               self.mi )
+        self.e = self.ms.epsilons()
+        e_hkls = self.e.indices()
+        self.e_eps  = self.e.data()
+        e_centric = self.ms.centric_flags().data()
+        self.mult = self.ms.multiplicities().data()
+        self.make_bins(data)
+        self.ycalc = self.e_eps*self.scale_pk
+        centric_factor = Numeric.where(e_centric , 1./math.sqrt(2), math.sqrt(2))
+        self.weight = centric_factor*self.scale/self.var_pk/self.e_eps
+
+
+    def make_bins(self,data):
+        stol2 = Numeric.array([data.sinthetaoverlambda2(i) for i in range(data.y.shape[0])])
+        assert Numeric.argsort(stol2) == Numeric.arange(stol2.shape[0])
+        mx = Numeric.maximum.reduce(stol2)
+        mn = Numeric.minimum.reduce(stol2)
+        self.bins = Numeric.arange(mn,mx,(mx-mn)/self.nbins)
+        self.intensity_in_bins = Numeric.zeros(self.bins.shape,Numeric.Float)
+        self.intensity2_in_bins = Numeric.zeros(self.bins.shape,Numeric.Float)
+        self.peaks_in_bins = Numeric.zeros(self.bins.shape,Numeric.Float)
+        self.scale_pk = Numeric.zeros(data.y.shape,Numeric.Float)
+        self.var_pk = Numeric.zeros(data.y.shape,Numeric.Float)
+        n=Numeric.searchsorted(stol2,self.bins).tolist()+[len(stol2)]
+        for i in range(len(n)-1):
+            self.intensity_in_bins[i] = Numeric.sum(data.y[n[i]:n[i+1]]*self.mult[n[i]:n[i+1]])
+            self.intensity2_in_bins[i] = Numeric.sum(data.y[n[i]:n[i+1]]*data.y[n[i]:n[i+1]]*self.mult[n[i]:n[i+1]])
+            self.peaks_in_bins[i] = Numeric.sum(self.mult[n[i]:n[i+1]])
+            avg = self.intensity_in_bins[i]/self.peaks_in_bins[i]
+            var = self.intensity2_in_bins[i]/self.peaks_in_bins[i] - avg*avg
+            if avg == 0.:
+               avg = self.intensity_in_bins[i-1]/self.peaks_in_bins[i-1]
+            if var== 0.:
+               var = self.intensity2_in_bins[i-1]/self.peaks_in_bins[i-1] - avg*avg
+            self.scale_pk[n[i]:n[i+1]] = avg
+            self.var_pk[n[i]:n[i+1]] = var
+            # print avg,var
+        self.n=Numeric.array(n)
+
+if __name__=="__main__":
+    import sys
+    from solventrefinedata import solventrefinedata
+    space_group_symbol = sys.argv[1]
+    dilsfile = sys.argv[2]
+    cclfile = sys.argv[3]
+    data = solventrefinedata(dilsfile,cclfile)
+    o = wilsonepsilon(space_group_symbol,20)
+    o.set_hkls(data.get_hkls())
+    o.compute(data)
+    from matplotlib.pylab import *
+    subplot(221)
+    title("Intensity")
+    plot(o.intensity_in_bins)
+    subplot(222)
+    title("Obs/Calc data")
+    plot(o.ycalc)
+    plot(data.y)
+    subplot(223)
+    title("Average I")
+    plot(o.intensity_in_bins/o.peaks_in_bins)
+    subplot(224)
+    title("E Values")
+    plot(data.y/o.ycalc)
+    show()
+    for i in range(1318,1323):
+        print i,data.ciiobject.HKL[i,:],data.ciiobject.Ihkl[i],o.e_eps[i],data.sinthetaoverlambda2(i)
+        
+@}
 
 \chapter{Factor analysis and non parametric statistics}
 
@@ -3789,8 +4565,8 @@ class ichooser:
       self.ciiobject=ciiobject
       self.functor  =functor
       self.lamb     =lamb
-      self.icalc    =ciiobject.y.copy() # initial values are Iobs
-#      self.icalc    =functor.imodel.copy() # initial values are Iobs
+      self.ycalc    =ciiobject.y.copy() # initial values are Iobs
+#      self.ycalc    =functor.imodel.copy() # initial values are Iobs
       self.ciiobject.ciiobject.formchol(damp=0.5) # hack
       self.W_Ic     =self.ciiobject.weightmatvec(self.ciiobject.y)
 
@@ -3798,12 +4574,12 @@ class ichooser:
       """
       Tries to improve the Icalc set by performing a 'refinement' cycle on them
       """
-      f , df = self.functor.compute(self.icalc)
+      f , df = self.functor.compute(self.ycalc)
       rhs = self.W_Ic + df/self.lamb
       self.ciiobject.ciiobject.nt=rhs.shape[0] # hack
-      self.icalc = self.ciiobject.ciiobject.solve(rhs,cycles=5)
-      self.f, df = self.functor.compute(self.icalc)
-      obsminuscalc=self.ciiobject.y - self.icalc
+      self.ycalc = self.ciiobject.ciiobject.solve(rhs,cycles=5)
+      self.f, df = self.functor.compute(self.ycalc)
+      obsminuscalc=self.ciiobject.y - self.ycalc
       self.chi2=Numeric.sum(obsminuscalc * self.ciiobject.weightmatvec(obsminuscalc) )
 
 @}
@@ -3903,7 +4679,7 @@ and:
 class entropyofi(functor):
    def __init__(self):
       pass
-   def compute(self,icalc):
+   def compute(self,ycalc):
       import Numeric 
       sumIcalc = Numeric.sum(Icalc)
       PIcalc = Icalc / sumIcalc       # Scales I to P(I)
@@ -3946,8 +4722,8 @@ class rffunctor(functor):
          wm=Numeric.maximum.reduce(weights)
          self.weights=Numeric.where(weights > wm/10. , weights, wm/10.)
       self.match=match
-   def compute(self,icalc):
-      d=self.imodel-icalc
+   def compute(self,ycalc):
+      d=self.imodel-ycalc
       if self.weights==None:
          f = Numeric.sum(d*d)
          df = 2*d
@@ -3981,14 +4757,14 @@ def test(ciifile,cclfile,pdbfile,Asolv,Bsolv,lamb):
    ichooserobject  = ichooser.ichooser(ciidataobj , rffunctorobject, lamb)
    for i in range(10):
       ichooserobject.cycle()
-      print "choos first peaks",ichooserobject.icalc[:10]
+      print "choos first peaks",ichooserobject.ycalc[:10]
       print "cycle",i, "functor=", ichooserobject.f, "chi^2=", ichooserobject.chi2
-   # Now have a look at the chosen icalc, originals and functor score for each
+   # Now have a look at the chosen ycalc, originals and functor score for each
    f_old,df = rffunctorobject.compute(model.ycalc.copy())
-   f_new,df = rffunctorobject.compute(ichooserobject.icalc)
+   f_new,df = rffunctorobject.compute(ichooserobject.ycalc)
    obsminuscalc=model.ycalc - ciidataobj.y
    chi2old=Numeric.sum(obsminuscalc * ciidataobj.weightmatvec(obsminuscalc) )
-   obsminuscalc=ichooserobject.icalc - ciidataobj.y
+   obsminuscalc=ichooserobject.ycalc - ciidataobj.y
    chi2new=Numeric.sum(obsminuscalc * ciidataobj.weightmatvec(obsminuscalc) )
    print "Old f=",f_old,"f_new=",f_new,"chi2old=",chi2old,"chi2new=",chi2new
 
@@ -4097,12 +4873,12 @@ class ccfunctor(functor):
       self.sumofmodelsq=Numeric.sum(self.imodel*self.imodel)
       self.sumofmodel  =Numeric.sum(self.imodel)
       self.syy=self.sumofmodelsq - self.sumofmodel*self.sumofmodel/self.imodel.shape[0]
-   def compute(self,icalc):
-#      print type(icalc),type(imodel)
-      self.sumofcalcsq=Numeric.sum(icalc*icalc)
-      self.sumofcalc=Numeric.sum(icalc)
-      sxx=self.sumofcalcsq - self.sumofcalc*self.sumofcalc/icalc.shape[0]
-      sxy=Numeric.sum(icalc * self.imodel) - self.sumofmodel*self.sumofcalc/icalc.shape[0]
+   def compute(self,ycalc):
+#      print type(ycalc),type(imodel)
+      self.sumofcalcsq=Numeric.sum(ycalc*ycalc)
+      self.sumofcalc=Numeric.sum(ycalc)
+      sxx=self.sumofcalcsq - self.sumofcalc*self.sumofcalc/ycalc.shape[0]
+      sxy=Numeric.sum(ycalc * self.imodel) - self.sumofmodel*self.sumofcalc/ycalc.shape[0]
       f=math.sqrt(sxy*sxy/sxx/self.syy)
       print "Functor scores",f
       df = Numeric.zeros(self.imodel.shape)
@@ -4130,12 +4906,12 @@ def test(ciifile,cclfile,pdbfile,Asolv,Bsolv,lamb):
    for i in range(10):
       ichooserobject.cycle()
       print "cycle",i, "functor=", ichooserobject.f, "chi^2=", ichooserobject.chi2
-   # Now have a look at the chosen icalc, originals and functor score for each
+   # Now have a look at the chosen ycalc, originals and functor score for each
    f_old,df = ccfunctorobject.compute(model.ycalc.copy())
-   f_new,df = ccfunctorobject.compute(ichooserobject.icalc)
+   f_new,df = ccfunctorobject.compute(ichooserobject.ycalc)
    obsminuscalc=model.ycalc - ciidataobj.y
    chi2old=Numeric.sum(obsminuscalc * ciidataobj.weightmatvec(obsminuscalc) )
-   obsminuscalc=ichooserobject.icalc - ciidataobj.y
+   obsminuscalc=ichooserobject.ycalc - ciidataobj.y
    chi2new=Numeric.sum(obsminuscalc * ciidataobj.weightmatvec(obsminuscalc) )
    print "Old f=",f_old,"f_new=",f_new,"chi2old=",chi2old,"chi2new=",chi2new
 
@@ -4464,14 +5240,18 @@ $\partial I^m / \partial z$.
 We will make the somewhat dodgy assumption that the model weights are going to 
 be diagonal for an easier life coding.
 
+
+
+
 @O maxlike.py
 @{
 """
 Maximum Likelihood computations with correlated integrated intensities
 """
 @< pycopyright @>
-
-from Numeric import sum
+import Numeric
+import cii
+from math import log,exp
 class maxlike:
    """
    Maximum likelihood computations
@@ -4482,16 +5262,12 @@ class maxlike:
        Model should be a maximum likelihood model object
        alpha is an optional float for the scale factor
        """
-       self.data=data
+       self.data =data
        self.model=model
        self.alpha=alpha
-
-   def compute_I_s(self):
-       """
-       Computes I^s
-       """
-       if self.alpha == None:
-          self.alpha = sum(self.data.Ihkl)/sum(self.model.
+       self.I_s = None
+       self.S   = None
+       self.B   = None
 
    def compute_S(self):
        """
@@ -4499,42 +5275,423 @@ class maxlike:
 
        S will be a ciimatrix object (sparse symmetric matrix)
        """
-       ni = self.data.Ihkl.shape[0]
-       Ihkl = self.data.Ihkl
-       HKl  = self.data.HKL
-       IP   = self.data.IP[0:ni]
-       matrix = self.alpha * self.alpha * self.data.matrix.copy()[0:IP[-1]])
+       ni = self.data.ciiobject.Ihkl.shape[0]
+       Ihkl = self.data.ciiobject.Ihkl
+       HKL  = self.data.ciiobject.HKL
+       IP   = self.data.ciiobject.IP[0:ni]
+       matrix = self.alpha * self.alpha * self.data.ciiobject.matrix.copy()[0:IP[-1]]
        for i in range(IP.shape[0]):
-          matrix[IP[i]] = matrix[IP[i]] + model.weight[i]
-       self.S = ciimatrixfromdata(ni,Ihkl,HKL,IP,matrix)
+          try:
+              matrix[IP[i]-1] = matrix[IP[i]-1] + self.model.weight[i]
+          except:
+              print "ohshit in maxlike.compute_S() - array overstep?"
+              print i
+              print "IP[i]-1",IP[i]-1,IP[0]-1
+              print matrix.shape,self.model.weight.shape
+       self.S = cii.ciimatrixfromdata(ni,Ihkl,HKL,IP,matrix.astype(Numeric.Float32))
 
 
    def compute_B(self):
        """
        B (vector) = alpha . W^d . I^d + ~W^m . ~I^m
        """
-       self.B = self.alpha * self.data.weightmatvec(self.data.Ihkl) + self.model.weightmatvec(self.model.IHKL)
+       self.B = self.alpha * self.data.weightmatvec(self.data.y) + self.model.weightmatvec(self.model.ycalc)
+       # print "self.B",self.B[:10],self.B[-10:]
 
+   def compute_Is(self):
+       if self.alpha == None:
+          self.alpha = sum(self.data.Ihkl)/sum(self.model.Ihkl)
+          linarp.logging.info("Maxlike sets alpha to: %f"%(self.alpha))
+       if self.S is None:
+          self.compute_S()
+       if self.B is None:
+          self.compute_B()
+       self.S.formchol(damp=0.0)
+       linarp.logging.debug("maxlike.compute_Is:max/min L %f %f"%\
+               (Numeric.maximum.reduce(self.S.L), Numeric.minimum.reduce(self.S.L)))
+       # print "chol(S)",self.S.L[0:10],self.S.L[-10:]
+       self.I_s = self.S.solve(self.B,cycles=3,positive=0)
+       # print "self.I_s:", self.I_s[:10], self.I_s[-10:]
+
+   def rot_optmise_scale(self):
+       fom = -1e99
+       best = 1.
+       start = self.model.get_value("scale")
+       for step in [0.5,-0.1,0.01]:
+           fac = best
+           while 1:
+              fac = fac+step
+              self.model.set_value("scale",start*fac)
+              f = self.get_fom() 
+              if f > best:
+                 best=fac
+                 fom=f
+              if f < best:
+                 break     
 
    def optimise_scale(self):
        """
        Maximises likelihood figure of merit by altering scale factor, alpha
        """
-       pass
-   def max_like_fom(self):
+       # raise Exception("Does not make sense to do this here!")
+       self.model.compute(self.data)
+       maxfom = -1e99
+       linarp.logging.info("Optimising model scaling factor")
+       linarp.logging.info("# Scale Factor_applied FOM")
+       from time import clock
+       # 1D simplex
+       facs = [0.25,1.,2.]
+       got = [False,False,False]
+       fom=[0.,0.,0.]
+       allfacs = []
+       allfom = []
+       scale = float(self.model.get_value("scale"))
+#       print "SCALE",scale,type(scale)
+       for k in range(10):
+           allfacs.append(facs)
+           #facs.sort()
+           start = clock()
+           linarp.logging.info("ml:facs: %f %f %f"%(facs[0],facs[1],facs[2]))
+#           print facs
+           for i in range(len(facs)):
+             fac=facs[i]
+             if got[i]==1:
+                continue
+             newscale = scale*fac
+#             print fac,scale,newscale
+             linarp.logging.info("ml:newscale: %f"%(newscale))
+             try:
+                 self.model.scale = newscale
+                 self.model.set_value("scale", newscale )
+             except:
+                 pass
+             try:
+                 self.get_fom()
+#                 print self.model.ycalc[-1]
+                 fom[i]=self.fom
+                 linarp.logging.info("ml:fom: %s"%(str(fom)))
+                 got[i]=1
+             except:
+                 import traceback
+                 traceback.print_exc()
+           allfom.append(fom)
+           lf = [log(f) for f in facs]
+           if None not in fom:
+              best = minquad(Numeric.array(lf),Numeric.array(fom))
+              pos = Numeric.searchsorted(lf,best)
+           else:
+              pos = 2-fom.index(None)
+              print "NONE found at ",pos ,fom
+              best = -1e99
+           linarp.logging.info("ml:cycletime,pos,val: %f %f %f"%(clock()-start,pos,exp(best)))
+           if pos == 0 : # off of low end
+              if abs(lf[0]-best) > log(4):
+                 # more than a factor of 2
+                 print lf[0],best,lf[0]-best,log(4)
+                 facs = [facs[0]/4,facs[0]/2,facs[0]]
+              else:
+                 facs = [exp(best/2.),exp(best),facs[0]]
+              fom = [0.,0.,fom[0]]
+              got = [0,0,1]
+              linarp.logging.info("ml:lowend:newfacs %f %f %f"%(facs[0],facs[1],facs[2]))
+#              print "newfacs",facs,lf
+              continue
+           if pos == 3 : # off of high end
+              if best - lf[2] > log(4):
+                  # more than a factor of 2!
+                  facs = [facs[2], facs[2]*2, facs[2]*4]
+              else:
+                  facs = [facs[2],exp(best),exp(best*2)]
+              linarp.logging.info("ml:highend:newfacs %f %f %f"%(facs[0],facs[1],facs[2]))
+              fom = [fom[2],0.,0.]
+              got = [1,0,0]
+#              print "newfacs",facs,lf
+              continue
+           facs = [facs[pos-1],(facs[pos-1]+facs[pos])/2,facs[pos]]
+           fom = [fom[pos-1],0.,fom[pos]]
+           got = [1,0,1]
+           linarp.logging.info("ml:bracket")
+#           print "newfacs",facs,lf
+       try: 
+          self.model.scale = scale*exp(best)
+       except: 
+          self.model.set_value("scale", self.model.get_value("scale")*exp(best))
+       self.get_fom()
+ 
+   def get_fom(self):
+       self.model.compute(self.data)
+       self.compute_S()
+       self.compute_B()
+       self.compute_Is()
+       self.fom = self.log_max_like_fom()
+       return self.fom
+
+   def check_Is(self):
+       """
+       Test the generated I_s to see if they solve S.I_s = B
+       """
+       err = self.B - self.S.fastmatvec(self.I_s)
+       linarp.logging.info("checking: min/max(B - S.I_s) = %f %f"%\
+            (Numeric.minimum.reduce(err),Numeric.maximum.reduce(err)))
+       linarp.logging.info("checking: min/max(I_s) = %f %f"%\
+            (Numeric.minimum.reduce(self.I_s),Numeric.maximum.reduce(self.I_s)))
+       d = self.I_s - self.data.y
+       # print d.shape,self.data.weightmatvec(d).shape
+       return d*self.data.weightmatvec(d)    
+
+   def log_det_S(self):
+       """
+       det(AB) = det(A)det(B)
+       Determinant of a triangular matrix is the product of the diagonal elements
+       log(det) is therefore the sum
+       """
+       import pylibchol
+       # damp =0.0
+       try: 
+          L = pylibchol.fcholdc(self.S.realmatrix.astype(Numeric.Float32), self.S.IP, self.S.nt)
+       except:
+          # Cholesky fails only for a zero determinant since det(S) is >= 0!
+          # Hence log(det(S)) = -Infinity
+          return None
+       d=0.
+       for i in range(self.S.nt):
+          d=d+log(L[self.S.IP[i]-1])
+       # Factor of 2 for log(det(L^T.L)) = 2 log (det(L))
+       return 2*d
+
+   def log_det_Wm(self):
+       """
+       Diagonal matrix - det(Wm) = product of diagonals
+       log(det) is therefore sum
+       """
+       d=0.
+       try:
+           for i in range(self.model.weight.shape[0]):
+               d=d+log(self.model.weight[i])
+       except:
+           print "Exception in log_det_Wm"
+           print i-5,i+5,self.model.weight[i-5:i+5]
+           raise
+       return d
+
+   def log_max_like_fom(self):
        """
        Compute the maximum likelihood figure of merit
        """
-       pass
+       assert self.I_s is not None
+       # f_s = {Id.Wd.Id + Im.Wm.Im - Is.S.Is} * sqrt(det_Wm()) / sqrt(det_S())
+       # log(AB) = log(A)+log(B)
+       # 
+       import pylibchol
+       ip = self.data.ciiobject.IP[:self.data.ciiobject.ni].astype(Numeric.Int32)
+       m = self.data.ciiobject.matrix[:ip[-1]]
+       #print len(ip),len(self.data.y),self.data.y.shape
+       Id = Numeric.dot(self.data.y, pylibchol.fmatvec(m.astype(Numeric.Float32),ip,self.data.y,len(ip)))
+       Im = Numeric.dot(self.model.ycalc, self.model.weight*self.model.ycalc)
+       ip = self.S.IP[:self.data.ciiobject.ni].astype(Numeric.Int32)
+       m  = self.S.realmatrix[:ip[-1]]
+       Is = Numeric.dot(self.I_s, pylibchol.fmatvec(m.astype(Numeric.Float32),ip,self.I_s,len(ip)))
+       dwm = self.log_det_Wm()
+       ds  = self.log_det_S()
+       # alternative form for f(Is) = (Iobs-I)Wobs(Iobs-I)  + (Im-I)Wm(Im-I)
+       dobs = self.data.y - self.I_s
+       dmod = self.model.ycalc - self.I_s
+       fI_s = Numeric.dot(dobs, self.data.ciiobject.fastmatvec(dobs)) + \
+              Numeric.dot(dmod, self.model.weight*dmod)
+       # print "CHECK", "fI_s",fI_s/2,(Is-Id-Im)/2, fI_s/(Is-Id-Im),"Is",Is,"Id",Id,"Im",Im,"dwm",dwm,"ds",ds
+       # assert abs(-fI_s/(Is - Id - Im ) - 1 ) < 0.1 , "maths blew up in maxlike.log_max_like_fom %f"%(fI_s/(Is-Id-Im))
+       # factor of two on determinants is for sqrt
+       try:
+          fom = -fI_s/2. + dwm/2 - ds/2  
+          linarp.logging.debug("ml_fom f(I_s)= %f det(Wm)= %f det(S)= %f fom= %f"%(fI_s,dwm,ds,fom))
+       except:
+          fom = None
+          linarp.logging.info("ml undefined!")
+       return fom
+ 
+
+
+def minquad(x,y):
+    """
+    Function:
+        y = a*x*x + b*x + c
+    Gradients:
+        dy/da = x*x
+        dy/db = x
+        dy/dc = 1
+    Min/Max at:
+        dy/dx = 2*a*x+b = 0 
+        ... x = -b/a/2
+    """
+    import LinearAlgebra
+    matrix = Numeric.zeros((3,3),Numeric.Float)
+    rhs    = Numeric.zeros((3),Numeric.Float)
+    ga = x*x
+    gb = x
+    gc = Numeric.ones(x.shape,Numeric.Float)
+    matrix[0,0] = Numeric.dot(ga,ga)
+    matrix[0,1] = Numeric.dot(ga,gb)
+    matrix[0,2] = Numeric.dot(ga,gc)
+    matrix[1,0] = matrix[0,1]
+    matrix[2,0] = matrix[0,2]
+    matrix[1,1] = Numeric.dot(gb,gb)
+    matrix[1,2] = Numeric.dot(gb,gc)
+    matrix[2,1] = matrix[1,2]
+    matrix[2,2] = Numeric.dot(gc,gc)
+    rhs[0] = Numeric.dot(ga,y)
+    rhs[1] = Numeric.dot(gb,y)
+    rhs[2] = Numeric.dot(gc,y)
+    inv = LinearAlgebra.inverse(matrix)
+    [a,b,c] = Numeric.matrixmultiply(inv,rhs)
+#    print a,b,c
+#    from matplotlib.pylab import plot,show
+#    plot(x,y,"r+")
+#    plot(x,a*x*x+b*x+c,"b-")
+#    show()
+    if a > 0: # This is a minimum - should go other way
+        return Numeric.sum(x)/x.shape[0]+b/a/2
+    else: # this is a maximum (yay)       
+        return -b/a/2
+
+#fom = [-1034.0881390548302, -904.27417923196117, -1061.7878844031793]
+#facs = [-3.4679976293343824, -2.0817032682144916, -0.6954089070946009]
+#print minquad(Numeric.array(facs),Numeric.array(fom))
+#import sys
+#sys.exit()
+ 
+def testwilson(model, data, outfile, outfile2, plotting=True):
+   data.ciiobject.nt = data.ciiobject.ni
+   model.set_hkls(data.get_hkls())
+   model.compute(data)
+   print "Done compute"
+   ml = maxlike(data,model,alpha=1.)
+   ml.optimise_scale()
+   fom = ml.get_fom()
+   print "Done, starting plots"
+   if not plotting:
+      return fom
+   from matplotlib.pylab import plot,show,legend,subplot,title,figure,errorbar,savefig
+   x = [data.sinthetaoverlambda2(x) for x in data.x]
+   subplot(211)
+   plot(x,model.ycalc,"b+",label="Model")
+   e=1/Numeric.sqrt(model.weight)
+   plot(x,model.ycalc+e,"b-")
+   plot(x,model.ycalc-e,"b-")
+   plot(x,data.y,"g+",label="Data")
+   plot(x,ml.I_s,"r+",label="ML")
+   legend()
+   subplot(212)
+   title("Diff")
+   resi = ml.check_Is()
+   cumula = Numeric.zeros(resi.shape,Numeric.Float)
+   cumula[0] = resi[0]
+   for i in range(1,resi.shape[0]):
+       cumula[i] = cumula[i-1]+resi[i]
+   plot(x,resi,"c+",label="Miss data")
+   plot(x,cumula,"g-",label="Miss data")
+   savefig(outfile+"_fit.png")
+   figure()
+   # make a binned up wilson plot
+   # add 50 peaks together
+   step = len(x)/50
+   s=[]
+   o=[]
+   c=[] 
+   i=0
+   while i < len(x)-step:
+      s.append(Numeric.sum(x[i:i+step])/step)
+      o.append(Numeric.sum(data.y[i:i+step])/step)
+      c.append(Numeric.sum(model.ycalc[i:i+step])/step)
+      i=i+step
+   plot(s,o,"r+",label="obs")
+   plot(s,c,label="calc")
+   savefig(outfile+"_wilson.png")
+   f=open(outfile+".plt","w")
+   f.write("# stol2 obs calc\n")
+   for i in range(len(s)):
+       f.write("%f %f %f\n"%(s[i],o[i],c[i]))
+   f.close()
+   legend()
+   out=open(outfile,"w")
+   out2=open(outfile2,"w")
+   scalefac1 = 9999./Numeric.maximum.reduce(ml.I_s)
+   scalefac2 = 9999./Numeric.maximum.reduce(data.y)
+   scale = min(scalefac1,scalefac2)
+   for i in range(len(x)):
+      from math import sqrt
+      h,k,l = data.ciiobject.HKL[i]
+      intensity = ml.I_s[i]*scale
+      sig_i     = ml.S.matrix[ml.S.IP[i]-1]
+      try:
+         # print intensity,sig_i
+         out.write("%4d%4d%4d%8.2f%8.2f\n"%(h,k,l,intensity,scale/sqrt(sig_i)))
+      except:
+         out.write("%4d%4d%4d%8.2f%8.2f\n"%(h,k,l,intensity,1.0))
+      intensity = data.y[i]*scale
+      sig_i     = data.ciiobject.matrix[data.ciiobject.IP[i]-1]
+      # print intensity,sig_i
+      try:
+         out2.write("%4d%4d%4d%8.2f%8.2f\n"%(h,k,l,intensity,scale/sqrt(sig_i)))
+      except:
+         out2.write("%4d%4d%4d%8.2f%8.2f\n"%(h,k,l,intensity,1))
+   out.close()
+   out2.close()
+   show()
+   print "FOM",ml.log_max_like_fom()
+   
+
 
 if __name__=="__main__":
-   # Do a demo and test run
-
-
+    # Do a demo and test run
+    import sys
+    symbol   = sys.argv[1]
+    import solventrefinedata
+    data = solventrefinedata.solventrefinedata(sys.argv[2],sys.argv[3])
+    outfile = sys.argv[4]
+#   import wilsonmodel
+#   model = wilsonmodel.wilsonmodel(symbol)
+#   testwilson(model, sys.argv[2:])
+    import solvatedwilson
+    model = solvatedwilson.solvatedwilsonmodel(symbol)
+    testwilson(model,data,outfile)
+    sys.exit()
+    import wilsonepsilon
+    nbins = [5,10,20,50,100]
+    scores = []
+    for nbin in nbins :
+        model = wilsonepsilon.wilsonepsilon(symbol,nbins=nbin)
+        scores.append( testwilson(model,data,outfile, plotting=False))
+    for i in range(len(nbins)):
+        print i, nbins[i], scores[i]
 
 
 @}
 
+
+
+\section{Maxlike testcases}
+
+@o testwilsonepsilon.py
+@{
+
+def test():
+    # Do a demo and test run
+    import sys
+    symbol   = sys.argv[1]
+    import solventrefinedata
+    data = solventrefinedata.solventrefinedata(sys.argv[2],sys.argv[3])
+    outfile = sys.argv[4]
+    outfile2 = sys.argv[5]
+    import wilsonepsilon
+    nbin = 10
+    model = wilsonepsilon.wilsonepsilon(symbol,nbins=nbin)
+    import maxlike
+    maxlike.testwilson(model,data,outfile,outfile2)
+
+
+if __name__=="__main__":
+    test()
+@}
 
 \section{Functions for computing $\Sigma$}
 
@@ -10475,8 +11632,8 @@ def getfcalc(peaks,s,cs=None,B=None):
    data=flex.double((0,)*mi.size())
    ms=miller.set(cs,mi)
    ma=miller.array(ms,data)
-   fcm=xray.structure_factors.from_scatterers(crystal_symmetry=cs,d_min=0.1)
-   fc=fcm(xray_structure=s,miller_set=ma,algorithm="direct").f_calc()
+   fcm=xray.structure_factors.from_scatterers(crystal_symmetry=cs,d_min=2.5)
+   fc=fcm(xray_structure=s,miller_set=ma).f_calc()# ,algorithm="direct").f_calc()
    f=flex.to_list(fc.data())
    return Numeric.array(f)
 
@@ -10639,10 +11796,10 @@ class translator:
       ie - the molecule should already be in the right cell and spacegroup
            but perhaps not positioned correctly
       """
-      self.structure   = from_pdb(pdbfile)
+      self.structure   = from_pdb(pdbfile,min_distance_sym_equiv=1e-6,keep_scatterer_pdb_records=True)
+      self.structure.show_summary()
       # Long time to work it out, but cctbx shifts atoms to special positions if you are
       # not careful. Artificial intelligence ?-)
-      self.structure._min_distance_sym_equiv=0.000000000001
       open("translatororigin.pdb","w").write(xray_structure_as_pdb_file(self.structure))
       self.pdbfile=pdbfile
       self.p1structure = self.structure.asymmetric_unit_in_p1()
@@ -10954,6 +12111,285 @@ lists of orientations for testing and we turn to that work
 to get our orientations. The reference is:
 Acta Cryst B28, 1065, (1972).
 
+\subsection{Some actual code for rotating a molecule}
+
+This is very similar to the code for the translational model
+but we do not need to keep the phase factors.
+
+@o rotator.py
+@{
+from cctbx import sgtbx
+from cctbx.array_family import flex
+from iotbx.pdb.xray_structure import from_pdb
+from iotbx.pdb.xray_structure import xray_structure_as_pdb_file
+
+import getsymops, cctbxfcalc
+import Numeric as n
+from LinearAlgebra import inverse
+from math import pi
+import time
+from translator import translator
+
+class rotator(translator):
+   """ Compute structure factors for a structure plus a translation """
+   def __init__(self,pdbfile,hkls=None):
+      translator.__init__(self,pdbfile,hkls)
+      self.xyzs = n.transpose(n.array(self.structure.sites_cart()))
+      print "shape of self.xyzs",self.xyzs.shape
+
+   def set_hkls(self,hkls):
+      translator.set_hkls(self,hkls)
+      self.keys=self.symops.keys() # preserve ordering of keys here
+      self.hkls_to_get = []
+      for k in range(len(self.keys)):
+         t=self.symops[self.keys[k]][3,:]    # Translational part
+         m=self.symops[self.keys[k]][:3,:3]  # Rotational part
+         newhkls=n.matrixmultiply(self.hkls,m).astype(n.Int)
+         self.hkls_to_get.extend([(h[0],h[1],h[2]) for h in newhkls])
+      print len(self.hkls_to_get)
+      # Setting up add up structure factors
+      # put phase factor in look up table (first occurence)
+      # If already seen this hkl then it adds on with phase factor to previous
+      # occurence (1+delta_phi) or just sum(phi)
+      # put a zero in this position in the adding array
+      self.multarray = n.zeros((len(self.hkls),len(self.keys)),n.Complex)
+      self.ncont = n.zeros((len(self.hkls)),n.Int)
+#      for k in range(len(self.keys)):
+#              t=self.symops[self.keys[k]][3,:]    # Translational part
+#              m=self.symops[self.keys[k]][:3,:3]  # Rotational part
+      i=0
+
+      for hkl in self.hkls:
+          found=[]
+          j=0
+          for k in range(len(self.keys)):
+              t=self.symops[self.keys[k]][3,:]    # Translational part
+              m=self.symops[self.keys[k]][:3,:3]  # Rotational part
+              newhkl =tuple(n.matrixmultiply(hkl,m).astype(n.Int).tolist())
+              hrd=2.*pi*n.dot(newhkl,t) # phase factor
+              phi = n.cos(hrd)+1j*n.sin(hrd)
+              if newhkl not in found:
+                  self.multarray[i,j] = phi
+                  found.append(newhkl) # be sure not to find twice
+              else:
+                  found.append(None) # be sure not to find twice
+                  self.multarray[i,j] = 0.0
+                  self.multarray[i,found.index(newhkl)] += phi
+              j=j+1
+          # Number of contributions was:
+          self.ncont[i] =  len(found) - found.count(None)
+          # Average will be sum of all divided by ncont
+          # Guessing a 1D Gaussian walk has sigma of sqrt(N)
+          # avg = sum(Fi.Fj)/ncont
+          # sigma = sqrt(ncont)*avg = sum(Fi.Fj)/sqrt(ncont)
+          # weight = ncont/sum(Fi.Fj)^2
+          i=i+1
+      #  
+
+
+
+   def compute_fsq(self,rotation):
+      """
+      Compute f^2 for the model you gave 
+      """
+      rotated = n.matrixmultiply(rotation,self.xyzs)
+      # TO DO - look into this cctbx/C++ array stuff??
+      list_of_tuples = [ tuple(xyz) for xyz in n.transpose(rotated).tolist() ]
+      flexrotated  = flex.vec3_double(list_of_tuples)   
+      self.structure.set_sites_cart(flexrotated)
+      self.p1structure = self.structure.asymmetric_unit_in_p1()
+      # make fcalc arrays for hkls rotated by each symop and add on translation after
+      fc = cctbxfcalc.getfcalc(self.hkls_to_get,self.p1structure) # Molecular transform 
+      fc = n.transpose(n.reshape(fc,self.multarray.shape[::-1]))
+      fc = fc*self.multarray  # elementwise multiply
+      self.fsq = n.absolute(n.sum(fc*n.conjugate(fc),1)) # elementwise multiply
+      self.rotation=n.array(rotation)
+      self.sumfifj = n.zeros(len(self.hkls),n.Float)+1e-9
+      for k in range(len(self.keys)):
+         for l in range(len(self.keys)):
+             if l==k: continue
+             self.sumfifj = self.sumfifj + n.absolute(fc[:,k]*n.conjugate(fc[:,l]))
+      # factor of 4 cos k,l is like l,k
+      self.fsq_weight = 4*self.ncont/self.sumfifj/self.sumfifj
+      return
+      ### TEST CODE FOLLOWS
+      from matplotlib.pylab import plot,show,sqrt, legend
+      avg_step = self.sumfifj/self.ncont
+      random_walk = sqrt(self.ncont)*avg_step
+      random_walk = self.sumfifj/sqrt(self.ncont)
+      plot(random_walk,label="rw")
+      print self.ncont[:10]
+      print self.sumfifj[:10]
+      print self.fsq_weight[:10]
+      print 1/sqrt(self.fsq_weight[:10])
+      plot(self.fsq,label="Icalc")
+      plot(1/sqrt(self.fsq_weight),label="sig")
+      legend()
+      show()
+      import sys; sys.exit()
+
+if __name__=="__main__":
+   import sys
+   pdbfile = sys.argv[1]
+   obj = rotator(pdbfile)
+   hkls = [ (0,2,0), (0,4,0), (1,2,3) ]
+   obj.set_hkls(hkls)
+   mats = []
+   mats.append( n.identity(3))
+   import math
+   c=math.cos(math.pi*25/180)
+   s=math.sin(math.pi*25/180)
+   mats.append(n.array( [[c,0,s],[0,1,0],[-s,0,c]]))
+   for mat in mats:
+       obj.compute_fsq(mat)
+       for h,i in zip(hkls,range(len(hkls))):
+           print h,obj.fsq[i],obj.sigma[i]
+@}
+
+
+
+
+@o rotatedsolventmodel.py
+@{
+""" Much like a solvent model, but allows the molecule to be rotated and not positioned"""
+
+import rotator
+import solventmodel
+
+class rotatedsolventmodel(solventmodel.solventmodel):
+   def __init__(self,pdbfile,**kwds):
+      self.pdbfile=pdbfile
+      self.variables=['scale','Asolv','Bsolv']
+      solventmodel.model.model.__init__(self,**kwds)
+      self.rotator=rotator.rotator(pdbfile)
+      self.fsq=None
+
+   def set_hkls(self,hkls):
+      self.rotator.set_hkls(hkls)
+
+   def set_rotation(self,rotation):
+      self.rotator.compute_fsq(rotation)
+      self.fsq = self.rotator.fsq
+      self.fsq_weight = self.rotator.fsq_weight
+
+   def compute(self,data):
+      assert self.fsq!=None, "You must set the translation and hkls before computing"
+      solventmodel.solventmodel.compute(self,data)
+
+if __name__=="__main__":
+   import maxlike, solventrefinedata, sys, Numeric, math
+   dilsfile = sys.argv[1]
+   cclfile  = sys.argv[2]
+   data = solventrefinedata.solventrefinedata(dilsfile,cclfile)
+   pdbfile = sys.argv[3]
+   try: 
+      dils2file = sys.argv[4]
+      sxdataobj = solventrefinedata.solventrefinedata(dils2file,cclfile)
+   except:
+      sxdataobj = None
+   data.ciiobject.nt = data.ciiobject.ni  # ignore other pars 
+   model = rotatedsolventmodel(pdbfile,Asolv=0.9,Bsolv=150,scale=1.)
+   model.set_hkls(data.get_hkls())
+   model.set_rotation(Numeric.identity(3,Numeric.Float))
+   model.compute(data)
+   from Numeric import sum,sqrt,searchsorted
+   low = Numeric.searchsorted(data.s,1/6.3/6.3)
+   print "6.3 at",low
+   scale = model.get_value("scale")*sum(data.y[200:])/sum(model.ycalc[200:])
+   model.set_value("scale",scale)
+   ml = maxlike.maxlike(data,model,alpha=1.)
+   ml.optimise_scale()
+   steps=180
+   from time import clock
+   start = clock()
+   best = None
+   from matplotlib.pylab import plot,show,title,legend,subplot,xlabel,figure
+   for i in range(steps):
+       angle = i*180.0/steps-90.
+       c = math.cos(math.radians(angle))
+       s = math.sin(math.radians(angle))
+       rotmat = Numeric.array( [ [ c , 0., s], [0,1,0],[-s,0,c]] , Numeric.Float)  
+       model.set_rotation(rotmat)
+       #model.compute(data)
+       #plot(model.ycalc)
+       #plot(1./sqrt(model.weight))
+       #show()
+       ml = maxlike.maxlike(data,model,alpha=1.)
+       fom = ml.get_fom()
+#       print "Min model weight", Numeric.minimum.reduce(model.weight)
+       diff = model.ycalc-data.y
+       chi2 = Numeric.dot(diff,data.weightmatvec(diff))
+       diff = ml.I_s-data.y
+       chi3 = Numeric.dot(diff,model.weightmatvec(diff))
+       if best is None:
+          bestfom = fom
+          best=rotmat
+       elif fom > best:
+          bestfom=fom
+          best=rotmat
+       if sxdataobj is not None:
+          scal = sum(sxdataobj.y)/sum(model.ycalc)
+          diff = sxdataobj.y - model.ycalc*scal
+          chi4 = Numeric.dot(diff,model.weightmatvec(diff))
+       else:
+          chi4 = 0.
+       print "ANGLE",angle,"FOM",fom,"Chi2_data",chi2,"Chi2_model",chi3,"Chi2_Is",chi4
+   end=clock()
+   print "That took",end-start,"about",(end-start)/steps,"per step"
+   model.set_rotation(best)
+   model.compute(data)
+   ml = maxlike.maxlike(data,model,alpha=1.)
+   fom = ml.get_fom()
+   x = [data.sinthetaoverlambda2(x) for x in data.x]
+   subplot(221)
+   title("Max-Like misfits")
+   resi = ml.check_Is()
+   mdif = model.ycalc - data.y
+   
+   mres = mdif*model.weightmatvec(mdif)
+   cumula = Numeric.zeros(resi.shape,Numeric.Float)
+   cumulm = Numeric.zeros(resi.shape,Numeric.Float)
+   cumula[0] = resi[0]
+   cumulm[0] = mres[0]
+   for i in range(1,resi.shape[0]):
+       cumula[i] = cumula[i-1]+resi[i]
+       cumulm[i] = cumulm[i-1]+mres[i]
+   plot(x,resi,"c+",label="$I^{s}-data$")
+   plot(x,cumula,"g-",label="$I^{s}-data$")
+   legend(loc="center right")
+   subplot(222)
+   title("Max-like misfits")
+   plot(x,mdif,"c+",label="$I^{s}-model$")
+   plot(x,cumulm,"g-",label="$I^{s}-model$")
+   legend(loc="center right")
+   diff = model.ycalc-data.y
+   chi2 = diff*data.weightmatvec(diff)
+   subplot(223)
+   title("Least squares misfits")
+   plot(x,chi2,"c+",label="$I^{calc}-I_{obs}W^{data}$")
+   cumula = Numeric.zeros(chi2.shape,Numeric.Float)
+   cumula[0] = chi2[0]
+   for i in range(1,resi.shape[0]):
+       cumula[i] = cumula[i-1]+chi2[i]
+   plot(x,cumula,"g-",label="$I^{calc}-data$")
+   legend(loc="center right")
+   subplot(224)
+   chi=diff*model.weightmatvec(diff)
+   plot(x,chi,"m+",label="$I^{calc}-I_{obs}W^{model}$")
+   cumula = Numeric.zeros(chi2.shape,Numeric.Float)
+   cumula[0] = chi[0]
+   for i in range(1,resi.shape[0]):
+       cumula[i] = cumula[i-1]+chi[i]
+   plot(x,cumula,"g-")
+   xlabel("$1/d^2$")
+   figure()
+   plot(x,model.ycalc,label="calc")
+   plot(x,1/Numeric.sqrt(model.weight),label="sig")
+   plot(x,data.y,label="obs")
+   legend()
+   show()      
+   
+@}
 
 
 
@@ -11018,7 +12454,7 @@ It will try to refine the overall scale and two solvent scattering parameters.
 @{
 @< pycopyright @>
 import Numeric as n
-import model
+import model, linarp
 import cctbxfcalc
 class solventmodel(model.model):
    def __init__(self,pdbfile,**kwds):
@@ -11031,22 +12467,48 @@ class solventmodel(model.model):
       fsq=abs(fcalc).astype(n.Float32)
       self.fsq=fsq*fsq*1e-6
 
+   def weightmatvec(self,vec):
+      return self.weight*vec
+
    def compute(self,data):
       # peak here needs to specify h,k,l,fcalc
       self.ycalc=n.zeros(data.npoints,n.Float32)
       self.gradients=n.zeros((data.npoints,3),n.Float32)
-      scale=self.vv[self.vd['scale']]
+      scale=self.get_value('scale')
       A =   self.vv[self.vd['Asolv']]
       B =   self.vv[self.vd['Bsolv']]
       ebs=n.exp(-B*data.s).astype(n.Float32)  # data supplies sin(theta)/lambda in s
       e2bs=ebs*ebs
+#      print "in solventmodel.compute, scale =",scale
       self.ycalc = scale * self.fsq *(1.0 - 2.0*A*ebs + A*A*e2bs )
       self.gradients[:,0]=(self.ycalc/scale).astype(n.Float32)
       self.gradients[:,1]=(2 * scale * self.fsq * (A*e2bs-ebs)).astype(n.Float32)
       self.gradients[:,2]=(2 * scale * data.s * A * self.fsq * (ebs-A*e2bs)).astype(n.Float32)
+      try:
+          scaler = scale * (1.0 - 2.0*A*ebs + A*A*e2bs)
+          W_f = self.fsq_weight / scaler / scaler
+          # Average difference per peak
+          sig_solv = 0.1*( scale*n.sum(self.fsq) - n.sum(self.ycalc) )/self.ycalc.shape[0]
+          # into resolution shells
+          sig_solv = sig_solv/(1.0 - 2.0*A*ebs + A*A*e2bs )
+          sig_missing = 0.1*n.sum(self.ycalc)/self.ycalc.shape[0]
+          self.weight = 1/( 1/W_f + sig_solv*sig_solv + sig_missing*sig_missing)
+          if False: # Debugging code
+            from matplotlib.pylab import plot,show,sqrt,legend
+            plot(self.ycalc,label="calc")
+            plot(1/sqrt(W_f),label="model")
+            plot(sig_solv,label="solv")
+            plot(1/sqrt(self.weight),label="sigma")
+            legend()
+            show()
+            import sys
+            sys.exit()
+      except:
+          linarp.logging.info("No weights being used on solvent model")
+          pass
 # Used Numeric for a factor 10 speedup
 #      for i in range(data.npoints):
-#         s = data.sinthetaoverlambda2(i)   # peaks must provide their d-spacings and icalc
+#         s = data.sinthetaoverlambda2(i)   # peaks must provide their d-spacings and ycalc
 #         fsq=self.fsq[i]
 #         self.ycalc[i]=scale * fsq * ( 1.0 - 2.* A * exp(-B * s ) + 
 #                                             A * A * exp(-2.* B * s ) ) 
@@ -12763,6 +14225,39 @@ setup(name = 'likelihood_poly_app',
 @}
 
 
+Sorry for this:
+
+@o buildlinarp.bat
+@{
+nuweb linarp
+\python24\python setup.py build --compiler=mingw32
+copy build\lib.win32-2.4\*.pyd .
+@}
+
+\section{A linarp library module}
+
+Eventually the compiled code and reusable scripts should go into a 
+library to be able to reuse them.
+Also all the printing to stdout can be replaced by the python logging
+module for more flexible debugging.
+
+
+@O linarp.py
+@{
+""" 
+To be called from __init__
+"""
+__version__ = "0.0.1"
+__author__ = "Jon Wright"
+#etc
+
+import logging, sys
+logging.basicConfig(level=logging.INFO,stream=sys.stdout)
+
+
+@}
+
+
 \section{Testing}
 
 @o linarptests.py
@@ -12990,6 +14485,8 @@ defined here.
 """
 @< fortrancopyright @>
 """
+# System logging, version etc
+import linarp
 @}
 
 Now for the GPL itself. Rather long, isn't it.
