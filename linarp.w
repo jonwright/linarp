@@ -3621,7 +3621,7 @@ class wilsonepsilon(wilsonmodel.wilsonmodel):
         for i in range(len(n)-1):
             self.intensity_in_bins[i] = Numeric.sum(data.y[n[i]:n[i+1]]*self.mult[n[i]:n[i+1]])
             self.intensity2_in_bins[i] = Numeric.sum(data.y[n[i]:n[i+1]]*data.y[n[i]:n[i+1]]*self.mult[n[i]:n[i+1]])
-            self.peaks_in_bins[i] = Numeric.sum(self.mult[n[i]:n[i+1]])
+            self.peaks_in_bins[i] = Numeric.sum(self.mult[n[i]:n[i+1]]*self.e_eps[n[i]:n[i+1]])
             avg = self.intensity_in_bins[i]/self.peaks_in_bins[i]
             var = self.intensity2_in_bins[i]/self.peaks_in_bins[i] - avg*avg
             if avg == 0.:
