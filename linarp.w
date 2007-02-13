@@ -3603,7 +3603,7 @@ class wilsonepsilon(wilsonmodel.wilsonmodel):
         self.make_bins(data)
         self.ycalc = self.e_eps*self.scale_pk
         centric_factor = Numeric.where(e_centric , 1./math.sqrt(2), math.sqrt(2))
-        self.weight = centric_factor*self.scale/self.var_pk/self.e_eps
+        self.weight = centric_factor*self.scale/self.var_pk/self.e_eps/self.e_eps
 
 
     def make_bins(self,data):
